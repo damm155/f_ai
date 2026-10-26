@@ -1,6 +1,7 @@
 package com.aicode.feature.workspace.domain
 
 import com.aicode.feature.agent.domain.container.ContainerInstaller
+import com.aicode.feature.agent.domain.container.ReverseAssets
 import com.aicode.feature.settings.data.repository.ContainerSettingsRepository
 import com.aicode.feature.workspace.data.repository.WorkspaceRepository
 import io.mockk.every
@@ -22,6 +23,7 @@ class WorkspacePathMapperTest {
     private val containerInstaller: ContainerInstaller = mockk()
     private val containerSettingsRepository: ContainerSettingsRepository = mockk()
     private val pathHomeResolver: PathHomeResolver = mockk()
+    private val reverseAssets: ReverseAssets = mockk()
 
     private val wsRoot = "/data/ws"
     private val aicodeDir = "/data/aicode"
@@ -43,7 +45,13 @@ class WorkspacePathMapperTest {
                 else -> p
             }
         }
-        return WorkspacePathMapper(workspaceRepository, containerInstaller, containerSettingsRepository, pathHomeResolver)
+        return WorkspacePathMapper(
+            workspaceRepository,
+            containerInstaller,
+            containerSettingsRepository,
+            pathHomeResolver,
+            reverseAssets
+        )
     }
 
     // ---------- toHostFile：容器路径 → 宿主文件 ----------

@@ -74,8 +74,11 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.aicode.feature.agent.domain.reverse.ApkTypeDetector
+import com.aicode.feature.agent.domain.reverse.BlutterAnalysisController
+import com.aicode.feature.agent.domain.reverse.BlutterPhase
 import com.aicode.R
 import com.aicode.core.theme.Spacing
 import com.aicode.core.ui.ImageViewerHost
@@ -1281,6 +1284,10 @@ fun AIChatPanel(
         }.collect { calibrateToAnchor() }
     }
 
+    // Blutter 本地分析：选「Flutter 应用」后自动触发，浮窗展示进度（不耗 AI 额度）
+    val blutterController: BlutterAnalysisController = androidx.hilt.navigation.compose.hiltViewModel()
+    val blutterState by blutterController.state.collectAsStateWithLifecycle()
+
     val sendMessage: () -> Unit = {
         val text = inputText.trim()
         if (text.isNotEmpty() || pendingAttachments.isNotEmpty()) {
@@ -1743,6 +1750,9 @@ fun AIChatPanel(
                 onInterjectQueued = { viewModel.interjectQueuedRequest(it) },
                 dashboardState = currentDashboardState,
                 todoItems = currentTodoItems,
+                blutterState = blutterState,
+                onBlutterDismiss = { blutterController.dismiss() },
+                onBlutterCancel = { blutterController.cancel() },
                 sessionId = currentSessionId.orEmpty(),
                 onTodoExpandedChange = { todoExpanded = it },
                 forceCollapseDashboard = pendingPermission != null || pendingQuestion != null || planApproval != null || imeVisible,
@@ -1881,7 +1891,13 @@ fun AIChatPanel(
                         apkRoutePrompt = null
                         val instruction = apkRouteInstructionText(selection.fileName, kind)
                         val chosen = listOf(selection.attachment)
-                        // 直接入队一条带路由指令的请求，用户无需再复述「这是 Flutter 还是原生」
+                        // 选「Flutter 应用」时立即触发 Blutter 本地解析（不消耗 AI 额度）：
+                        // 附件在 /root/uploads/，把它 cp 到 /root/apk/（工具链工作目录）再启动。
+                        if (kind == com.aicode.feature.agent.domain.reverse.ApkTargetKind.FLUTTER) {
+                            blutterController.start(selection.attachment.containerPath)
+                        }
+                        // 同时入队一条带路由指令的请求：告知 AI 本地解析已启动、结果目录，
+                        // AI 会等浮窗完成后再接手（期间不重复跑 aicode-blutter）。
                         viewModel.enqueueAgentRequest(
                             request = instruction,
                             modelRequest = appendAttachmentsToRequest(context, instruction, chosen),

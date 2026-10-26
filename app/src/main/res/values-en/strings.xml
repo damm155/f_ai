@@ -1629,4 +1629,9 @@
     <string name="apk_route_native_desc">AndroidManifest / DEX inspection, patching and repacking (pure Python)</string>
     <string name="apk_route_recommended">Recommended</string>
     <string name="apk_route_detecting">Detecting APK type…</string>
+    <!-- Reverse: Blutter progress card -->
+    <string name="blutter_phase_ready">Preparing</string>
+    <string name="blutter_card_running">Blutter analyzing… %1$s</string>
+    <string name="blutter_card_done">Blutter analysis complete (no AI cost)</string>
+    <string name="blutter_card_failed">Blutter analysis failed</string>
 </resources>

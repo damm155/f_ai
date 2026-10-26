@@ -73,6 +73,8 @@ internal fun ApkRouteDialog(
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
+        containerColor = MaterialTheme.colorScheme.surface,
+        tonalElevation = 0.dp,
         title = { Text(text = stringResource(R.string.apk_route_dialog_title)) },
         text = {
             Column(modifier = Modifier.fillMaxWidth()) {

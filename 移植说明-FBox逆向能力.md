@@ -392,3 +392,85 @@ STORED 的 `.so` 按 **4096** 对齐、其余 STORED 按 4 对齐 → 重打包�
 1. `patch_so`（SO 字节补丁）——`aicode-so` 只读，Flutter 补丁链仍断在这一步
 2. Blutter Runner 快通道（18 个 .so + 独立 Service，收益：几分钟 → 秒级）
 3. 补丁柜（留档/回滚）、`reflutter` 接线、知识库经验接线、OCR
+
+### 10.6 patch_so（已按用户思路收敛到最简实现）
+
+**用户的定调**：不要复刻 FBox 的「Kotlin heredoc 运行期生成」——直接把两个脚本塞进
+`flutter-re.tar`（本来解压目标就是 `/root/flutter-re/`），一起分发，**零额外代码**。
+
+| 项 | 内容 |
+|---|---|
+| 来源 | 两个脚本从 FBox dex 里提取（`PATCH_SO_SCRIPT` / heredoc 内嵌，5649 / 4939 字符），**原封不动**使用 |
+| 落位 | `assets/reverse/flutter-re.tar` 内（条目 64 → 67），解压即到 `/root/flutter-re/{patch_so,fbox_gcc13_fix}.py` |
+| 自愈 | `FLUTTER_RE_REQUIRED` 加上两个脚本 → 缺失即整包重解，与 blutter 校验点同一机制 |
+| 回退 | `installRuntimeScripts` / `RUNTIME_SCRIPTS` 机制已删除（不需要了） |
+
+**patch_so.py 能力（FBox 原版，实测验证）**：
+- `virt_to_offset`：64 位小端 ELF 的 PT_LOAD 换算（比 so_tool 的 SoCtx 更轻，不看节区）
+- `assemble`：**内嵌汇编器**——不是 keystone，而是把 asm 写成 .s 文件调 GNU `as` + `objcopy` 取 `.text`，
+  **零额外依赖**（rootfs 自带 binutils）；亮点是**分支指令 PC 重定位**：
+  `b #0x1980` 会逐条跟踪当前地址、换算成 `. + 偏移` 再交给 as，编码正确
+- `patch_file`：r+ 写入 + 读回校验 + 同路径写自动 `.bak` 备份；`--out` 可另存
+- 指令长度校验：arm64 必须是 4 的倍数
+
+**实测（容器内真实 so：libandroid-shmem.so）**：
+```
+hex:  0x1978 --bytes "1F 20 03 D5"  → FD 7B BA A9 → 1F 20 03 D5（nop）✓ 读回通过
+asm:  0x1978 "mov w0, #1; ret"      → 20 00 80 52 C0 03 5F D6 ✓（与标准编码一致）
+branch: 0x1978 "b #0x1980"          → 02 00 00 14，disasm 回读 `b #0x1980 ; → shmget+0x8` ✓
+```
+
+**与 aicode-so patch 的分工**（都保留，写进了 wrapper 与提示词）：
+- 完整版 `python3 /root/flutter-re/patch_so.py <so> <addr> "asm…"`：asm 编译、分支重定位、.bak
+- 轻量版 `aicode-so patch <so> <addr:hex>[:more] [--dry] / --restore`：纯 hex 多地址、--dry 预览、.orig 整文件回滚
+
+至此 FBox 的 SO 补丁链在 AiCode 完整成立：
+`aicode-so symbols/jni/disasm` 定位 → `patch_so.py` 打补丁 → `aicode-so disasm` 回读验证。
+
+---
+
+## 十一、本轮修复（r3）
+
+### 11.1 选 Flutter 后自动触发 Blutter + 进度浮窗（核心缺口，已补）
+
+| 组件 | 说明 |
+|---|---|
+| `BlutterAnalysisController`（@HiltViewModel） | 状态流 `BlutterUiState`（apkName/phase/route/running/log/lastLine/exitCode/resultSummary）；`start()` 先把附件 cp 到 `/root/apk/`，再流式跑 `aicode-blutter`（`runCommandStream`，40 分钟超时），逐行 `collect` 更新状态；`cancel()/dismiss()` |
+| `BlutterProgressCard`（浮窗） | 输入框上方白底卡片：标题+路线标签（Runner So / 容器编译）、细进度条、最近一行、可展开的终端质感日志区（surfaceVariant、200dp 上限、自动滚动语义）、结束态结果与关闭。配色全走主题令牌 |
+| AIChatPanel 接线 | 选 Flutter → `start(attachment.containerPath)`；同时入队的路由指令明确「本地解析已启动、结果在 /root/out/<名>/、勿重跑」 |
+| 阶段猜测 | 按日志关键字切 phase（setup/Collecting→环境自愈；cmake/ninja→编译；pp.txt/asm→产出） |
+
+route 枚举预留 `RUNNER_SO`，接 Runner 快通道时只需在 start() 里改执行器，UI 零改动。
+
+### 11.2 对面 AI 实测报的 bug（全部修掉）
+
+| bug | 修法 | 验证 |
+|---|---|---|
+| `aicode-blutter --read` 必挂（heredoc 字符串断行） | 合并为单行字面量 | 真跑 `--read` 输出正常 ✓ |
+| `--status` 的 printf 同源断行 | 改 `\n` | sh -n ✓ |
+| `so_tool cfg` 两处 tuple/对象混用（603/619 行） | `insns[-1][0]/[3].size`、`block_ranges` 索引修 | `cfg shmget` 19 块 20 边 ✓ |
+
+### 11.3 容器不解压的根因排查（写给用户的指引）
+
+- `.installed` 标记 = `INSTALL_VERSION` 指纹（`debian-13-arm64-v1-<version 内容>-<openFd 长度>`）。
+- 换镜像后必须**指纹变化**才重解。占位→真镜像长度必变，理应触发；若没触发：
+  1. logcat 看「内置镜像版本串」——长度若为 -1，说明 `noCompress` 未生效（openFd 取不到长度），
+     此时指纹只取决于 version 文件内容——**覆盖镜像时 version 内容必须同步改**；
+  2. 最快兜底：设置 → 容器 → 重置容器。
+- 技能列表空与 rootfs 未就绪是同一条链（`ensureReverseAssets` 在 rootfs 就绪后才跑），
+  容器修好后技能自然出来——与用户实测现象吻合。
+
+### 11.4 弹窗白底
+
+`ApkRouteDialog` 显式 `containerColor = surface` + `tonalElevation = 0`，与 AiCode 其它弹窗一致。
+
+### 11.5 setup.sh 精简（用户决策：去掉 frida-tools / rizin）
+
+用户用外部 MCP Frida，容器内装 frida-tools 纯属拖累（pip 联网 150s+，每个新容器都要装一遍）；
+rizin 对 blutter 编译分析无用（ELF 分析已由 so_tool + binutils 覆盖）。
+
+- `flutter-re.tar` 内的 `setup.sh` 已替换为精简版：[1/4] apt 编译链 + [2/4] pyelftools + [3/4] blutter 命令别名 + [4/4] 标记。frida/rizin 段整段删除。
+- `aicode-blutter` 加快速探测：`python3 -c "import elftools" && cmake && ninja` 齐备时**整段跳过 setup.sh**——正常路径日志干净，浮窗不再闪「环境自愈」。
+- 浮窗阶段猜测收紧：只在日志出现 `pip3 install` / `apt-get install` / `Collecting` / `Downloading` 时才报「环境自愈」（真正在装包），而不是看到 setup.sh 字样就报。
+
+效果：真 Debian 镜像下，浮窗正常路径直接是「Blutter 解析中」；只有首次分析某 Dart 版本（要拉 SDK 编译）才会出现「编译 Dart 快照解析器」长阶段；环境真缺东西时才显示「环境自愈」。

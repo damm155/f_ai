@@ -600,7 +600,7 @@ def _build_cfg(ctx, addr, size_hint):
     leaders_sorted = sorted(leaders)
     block_ranges = []
     for i, lo in enumerate(leaders_sorted):
-        hi = leaders_sorted[i + 1] if i + 1 < len(leaders_sorted) else (insns[-1].address - addr + insns[-1].size)
+        hi = leaders_sorted[i + 1] if i + 1 < len(leaders_sorted) else (insns[-1][0] - addr + insns[-1][3].size)
         block_ranges.append((lo, hi))
 
     blocks = []
@@ -616,7 +616,7 @@ def _build_cfg(ctx, addr, size_hint):
 
     # 建边
     edges = []
-    for bid, lo, hi in block_ranges:
+    for bid, lo, hi in [(i, r[0], r[1]) for i, r in enumerate(block_ranges)]:
         body = [(a, mn, os_, ins) for a, mn, os_, ins in insns if lo <= (a - addr) < hi]
         if not body:
             continue

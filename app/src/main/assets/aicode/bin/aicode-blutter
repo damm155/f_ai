@@ -43,8 +43,7 @@ text=data.decode('utf-8','replace')
 print("✓ %s（共 %d 字符，显示前 %d）:" % (p, len(text), min(limit,len(text))))
 print(text[:limit])
 if len(text)>limit:
-    print("
-…（截断，共 %d 字符。用 sed -n '起,止p' %s 精读后续行区间）" % (len(text), p))
+    print("…（截断，共 %d 字符。用 sed -n '起,止p' %s 精读后续行区间）" % (len(text), p))
 PYEOF
   exit $?
 fi
@@ -90,8 +89,7 @@ if [ "$MODE" = "status" ]; then
   if [ ! -d "$OUT2" ]; then echo "✗ 目录不存在: $OUT2"; exit 1; fi
   echo "=== $OUT2 ==="
   for f in README.md pp.txt objs.txt frida.js; do
-    [ -f "$OUT2/$f" ] && printf "  %-12s %s 字节
-" "$f" "$(stat -c%s "$OUT2/$f")"
+    [ -f "$OUT2/$f" ] && printf "  %-12s %s 字节\n" "$f" "$(stat -c%s "$OUT2/$f")"
   done
   [ -d "$OUT2/asm" ] && echo "  asm/         $(ls "$OUT2/asm" | wc -l) 个文件"
   [ -f "$OUT2/.analyzed_meta" ] && echo "  .analyzed_meta 存在（已完成的缓存标记）"
@@ -156,9 +154,11 @@ fi
 
 mkdir -p "$OUT"
 
-# ① 环境自愈（幂等：缺 g++/cmake/ninja/pyelftools 才会装）
-if [ -f "$RE/setup.sh" ]; then
-    sh "$RE/setup.sh" || echo "⚠ setup.sh 返回非 0，继续尝试分析" >&2
+# ① 环境自愈（幂等）：编译依赖 + pyelftools 齐备时整段跳过（浮窗不闪"环境自愈"）
+if ! python3 -c "import elftools" 2>/dev/null || ! command -v cmake >/dev/null 2>&1 || ! command -v ninja >/dev/null 2>&1; then
+    if [ -f "$RE/setup.sh" ]; then
+        sh "$RE/setup.sh" || echo "⚠ setup.sh 返回非 0，继续尝试分析" >&2
+    fi
 fi
 
 # ② gcc13 适配补丁（存在才打；FBox 各版本命名不一，故用通配避免踩命名坑）

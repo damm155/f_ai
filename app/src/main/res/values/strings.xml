@@ -1628,4 +1628,9 @@
     <string name="apk_route_native_desc">AndroidManifest / DEX 查改与重打包（纯 Python，无需 Java）</string>
     <string name="apk_route_recommended">推荐</string>
     <string name="apk_route_detecting">正在识别 APK 类型…</string>
+    <!-- 逆向：Blutter 分析浮窗 -->
+    <string name="blutter_phase_ready">准备中</string>
+    <string name="blutter_card_running">Blutter 本地分析中… %1$s</string>
+    <string name="blutter_card_done">Blutter 分析完成（不消耗 AI 额度）</string>
+    <string name="blutter_card_failed">Blutter 分析失败</string>
 </resources>

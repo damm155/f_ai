@@ -173,6 +173,9 @@ internal fun ChatInputBar(
     onRefreshDashboardByButton: () -> Unit = {},
     onDashboardExpandedChange: (Boolean) -> Unit = {},
     todoItems: List<TodoItem> = emptyList(),
+    blutterState: com.aicode.feature.agent.domain.reverse.BlutterUiState? = null,
+    onBlutterDismiss: () -> Unit = {},
+    onBlutterCancel: () -> Unit = {},
     sessionId: String = "",
     onTodoExpandedChange: (Boolean) -> Unit = {},
     forceCollapseDashboard: Boolean = false,
@@ -336,6 +339,16 @@ internal fun ChatInputBar(
                     onMoveQueued = onMoveQueued,
                     onEditQueued = onEditQueued,
                     onInterjectQueued = onInterjectQueued
+                )
+            }
+
+            if (blutterState != null && blutterState.phase != com.aicode.feature.agent.domain.reverse.BlutterPhase.IDLE) {
+                BlutterProgressCard(
+                    state = blutterState,
+                    sessionId = sessionId,
+                    forceCollapse = forceCollapseDashboard,
+                    onDismiss = onBlutterDismiss,
+                    onCancel = onBlutterCancel
                 )
             }
 

@@ -1,14 +1,16 @@
 package com.aicode.feature.agent.domain.reverse
 
+import android.content.Context
 import com.aicode.core.util.FileLogger
 import com.aicode.feature.agent.domain.container.CommandEngine
 import com.aicode.feature.agent.domain.container.CommandEvent
 import com.aicode.feature.agent.domain.container.LinuxContainerEngine
-import android.content.Context
-import androidx.lifecycle.ViewModel
-import androidx.lifecycle.viewModelScope
+import com.aicode.feature.workspace.domain.WorkspacePathMapper
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
+import javax.inject.Inject
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -18,20 +20,32 @@ import kotlinx.coroutines.launch
 /**
  * Blutter 本地分析控制器（对齐 FBox 的「Blutter 解析 Dart AOT（本地执行，不消耗 AI 额度）」）。
  *
- * 双路线（对齐 FBox tryFastAnalyze 语义）：
- * 1. **快通道** [BlutterRunnerExecutor]：Dart snapshot hash → 命中内置 Runner So →
- *    :blutter 独立进程 JNI 执行（秒级，不联网）；
- * 2. **慢通道**：hash 未命中/失败 → 容器内 `aicode-blutter` 编译路线（首次需联网拉 Dart SDK）。
- *
- * 状态流 [state] 供输入框上方的进度浮窗订阅渲染（对齐 TodoDashboardBar 视觉）。
+ * 职责：
+ * 1. 持有分析进度状态（[state]），供输入框上方的进度浮窗订阅渲染；
+ * 2. 选定「Flutter 应用」线路后由 UI 调 [start]：
+ *    - 先试 **Runner So 快通道**（:blutter 独立进程，秒级，零联网零 token）；
+ *    - 未命中/失败自动回退 **容器编译路线**（aicode-blutter，40 分钟上限）；
+ * 3. 日志逐行回灌浮窗；完成后 UI 决定下一步（不自动发消息——用户主导，见 MINIS-PORT 第 5 轮）。
  */
 @dagger.hilt.android.lifecycle.HiltViewModel
-class BlutterAnalysisController @javax.inject.Inject constructor(
+class BlutterAnalysisController @Inject constructor(
     private val commandEngine: CommandEngine,
+    private val pathMapper: WorkspacePathMapper,
     private val runnerExecutor: BlutterRunnerExecutor,
-    @param:ApplicationContext private val context: Context
+    @ApplicationContext private val context: Context
 ) : ViewModel() {
-    /** App 侧直接可写的宿主 rootfs 根（容器内 / 的实体；容器内 /root 即其 root/ 子目录）。 */
+    private companion object {
+        const val TAG = "BlutterAnalysis"
+        const val TIMEOUT_MS = 40L * 60 * 1000
+    }
+
+    private val scope = viewModelScope
+    private var job: Job? = null
+
+    private val _state = MutableStateFlow(BlutterUiState.idle())
+    val state: StateFlow<BlutterUiState> = _state.asStateFlow()
+
+    /** 宿主 rootfs 根（容器内 / 的实体；容器 /root 即其 root/ 子目录）。 */
     private fun hostRootfs(): File = File(context.filesDir, "rootfs")
 
     private companion object {
@@ -44,21 +58,22 @@ class BlutterAnalysisController @javax.inject.Inject constructor(
     private suspend fun <T> withContextIO(block: () -> T): T =
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { block() }
 
-
-    private val scope = viewModelScope
-    private var job: Job? = null
-
-    private val _state = MutableStateFlow(BlutterUiState.idle())
-    val state: StateFlow<BlutterUiState> = _state.asStateFlow()
-
-    /** 是否有分析在跑（UI 显示浮窗/进度条的判据）。 */
-    val isRunning: Boolean get() = _state.value.running
+    /**
+     * 把容器内路径还原为**宿主真实路径**（App 侧 File 直接可读）。
+     *
+     * 附件的容器路径形如 `~/workspace/.aicode/attachments/x.apk`（`~` = /root），
+     * 经 WorkspacePathMapper 的挂载表翻回宿主 `files/projects/<项目>/.aicode/attachments/x.apk`。
+     * **不再用 shell cp**——附件源在 rootfs 之外，靠容器 cp 要处理 `~` 展开与引号转义，易错；
+     * 宿主两侧（工作区文件 ↔ rootfs/root/apk/）App 直接读写，一条 File.copyTo 搞定。
+     */
+    private fun hostFileOf(containerPath: String): File? = runCatching {
+        pathMapper.toHostFile(containerPath)
+    }.getOrNull()
 
     /**
      * 启动一次 Blutter 分析（幂等保护：已在跑则忽略）。
      *
-     * [apkContainerPath] 为**容器内路径**（如 /root/uploads/x.apk 或 /root/apk/x.apk）；
-     * 控制器只管把命令送进容器，不关心宿主映射。
+     * [apkContainerPath] 为**容器内路径**（如 ~/workspace/.aicode/attachments/x.apk）。
      */
     fun start(apkContainerPath: String) {
         if (_state.value.running) {
@@ -82,27 +97,22 @@ class BlutterAnalysisController @javax.inject.Inject constructor(
                 _state.value = _state.value.copy(log = lines.toString(), lastLine = line, phase = phaseOf(line))
             }
             try {
-                // 工具链工作目录约定：待分析 APK 在 /root/apk/（aicode-blutter/aicode-apk 均在此找）。
-                // 附件落在 /root/uploads/，先复制过去（幂等）。失败不中断——若源路径本就是 /root/apk/ 也无妨。
-                // 注意：容器路径可能是 ~/workspace/... 形式——shell 单引号内 ~ 不展开，
-                // 必须先展开为绝对路径（/root/workspace/...），否则 cp/blutter 全部找不到文件。
-                val apkAbs = apkContainerPath
-                    .replaceFirst("^~/?".toRegex(), "/root/")
-                    .let { if (!it.startsWith("/")) "/$it" else it }
-                runCatching {
-                    commandEngine.runCommandSync(
-                        "mkdir -p /root/apk /root/out && cp -f '${apkAbs.replace("'", "'\\''")}' /root/apk/ && ls -la /root/apk/${name}.apk",
-                        projectPath = null,
-                        timeoutMs = 15_000
+                // ── 预置 APK：宿主侧直接复制（附件 ↔ rootfs/root/apk/ 之间），零 shell ──
+                val hostApk = withContextIO { stageApk(apkContainerPath, name, ::append) }
+                if (hostApk == null) {
+                    _state.value = _state.value.copy(
+                        running = false,
+                        phase = BlutterPhase.FAILED,
+                        resultSummary = "APK 复制失败：附件路径无法映射到宿主（$apkContainerPath）。" +
+                            "请确认已上传附件且容器就绪。"
                     )
-                }.onFailure { FileLogger.w(TAG, "预置 /root/apk 失败（继续）: ${it.message}") }
+                    return@launch
+                }
 
                 // ===== 快通道：Runner So（对齐 FBox tryFastAnalyze；秒级，不联网）=====
                 if (runnerExecutor.isAvailable()) {
                     _state.value = _state.value.copy(route = BlutterRoute.RUNNER_SO)
                     append("〔快通道〕解 APK 抽取 libapp.so / libflutter.so…")
-                    // APK 落在宿主 rootfs 的 root/apk/（容器内 /root/apk/）——App 侧 File 直接可读
-                    val hostApk = File(hostRootfs(), "root/apk/$name.apk")
                     val extracted = withContextIO {
                         runnerExecutor.extractFlutterLibs(hostApk, File(hostRootfs(), "root/out/$name"))
                     }
@@ -130,7 +140,7 @@ class BlutterAnalysisController @javax.inject.Inject constructor(
                                 resultSummary = if (ok)
                                     "Runner 分析完成：/root/out/$name/（pp.txt / asm/ / objs.txt）"
                                 else
-                                    "Runner 退出码 $code（已记录，可回退容器编译路线）"
+                                    "Runner 退出码 $code（已记录黑名单，可回退容器编译路线）"
                             )
                             return@launch
                         }
@@ -141,7 +151,7 @@ class BlutterAnalysisController @javax.inject.Inject constructor(
                     _state.value = _state.value.copy(route = BlutterRoute.CONTAINER_BUILD)
                 }
 
-                // ===== 慢通道：容器编译路线（aicode-blutter）=====
+                // ===== 慢通道：容器编译路线（aicode-blutter；APK 已在 /root/apk/）=====
                 val flow = when (commandEngine) {
                     is LinuxContainerEngine ->
                         (commandEngine as LinuxContainerEngine).runCommandStream(
@@ -175,64 +185,107 @@ class BlutterAnalysisController @javax.inject.Inject constructor(
                     phase = if (ok) BlutterPhase.DONE else BlutterPhase.FAILED,
                     exitCode = exitCode,
                     resultSummary = if (ok)
-                        "Blutter 分析完成：$apkContainerPath → /root/out/$name/（pp.txt / asm/ / objs.txt）"
+                        "Blutter 分析完成：/root/out/$name/（pp.txt / asm/ / objs.txt）"
                     else
                         "Blutter 分析失败（exit=$exitCode）。常见原因：首次分析需联网拉 Dart SDK 失败；" +
                             "或该 Dart 版本未被 blutter 适配（走 aicode-so 兜底链）"
                 )
-                FileLogger.i(TAG, "blutter 结束 exit=$exitCode apk=$apkContainerPath")
-            } catch (e: Exception) {
+            } catch (e: kotlinx.coroutines.CancellationException) {
                 _state.value = _state.value.copy(
                     running = false,
                     phase = BlutterPhase.FAILED,
-                    exitCode = exitCode,
-                    resultSummary = "Blutter 分析异常: ${e.message}"
+                    resultSummary = "分析已取消"
                 )
-                FileLogger.e(TAG, "blutter 异常", e)
+            } catch (e: Exception) {
+                FileLogger.e(TAG, "Blutter 分析异常", e)
+                _state.value = _state.value.copy(
+                    running = false,
+                    phase = BlutterPhase.FAILED,
+                    resultSummary = "分析异常：${e.message}"
+                )
             }
         }
     }
 
-    /** 取消当前分析（浮窗上的关闭按钮）。 */
-    fun cancel() {
-        job?.cancel()
-        _state.value = _state.value.copy(
-            running = false,
-            phase = BlutterPhase.FAILED,
-            resultSummary = "已手动取消"
-        )
+    /**
+     * 把 APK 从附件目录复制到 /root/apk/<name>.apk（宿主两侧直拷）。
+     *
+     * 源路径解析顺序：
+     * 1. [WorkspacePathMapper.toHostFile]（挂载表：workspace/.aicode → 宿主项目目录）；
+     * 2. `~/` 前缀手工展开（mapper 不可用时的兜底，容错旧调用）；
+     * 3. 已是宿主路径则直接用。
+     * 成功后校验目标文件存在且非空，把失败暴露在 PREPARING 阶段而不是留给后续通道报「找不到」。
+     */
+    private suspend fun stageApk(
+        apkContainerPath: String,
+        name: String,
+        onLog: (String) -> Unit
+    ): File? = withContextIO {
+        val dst = File(hostRootfs(), "root/apk/$name.apk").apply {
+            parentFile?.mkdirs()
+        }
+        val src: File? = sequence {
+            yield(runCatching { pathMapper.toHostFile(apkContainerPath) }.getOrNull())
+            val expanded = apkContainerPath
+                .replaceFirst("^~/?".toRegex(), hostRootfs().absolutePath + "/root/")
+            yield(if (File(expanded).isFile) File(expanded) else null)
+            val asHost = File(apkContainerPath)
+            yield(if (asHost.isFile) asHost else null)
+        }.filterNotNull().firstOrNull { it.isFile }
+
+        if (src == null) {
+            onLog("✗ 找不到源 APK：$apkContainerPath")
+            return@withContextIO null
+        }
+        runCatching { src.copyTo(dst, overwrite = true) }
+            .onFailure {
+                onLog("✗ APK 复制失败：${it.message}")
+                return@withContextIO null
+            }
+        if (!dst.isFile || dst.length() == 0L) {
+            onLog("✗ APK 复制后为空：${dst.absolutePath}")
+            return@withContextIO null
+        }
+        onLog("✓ APK 已就位：/root/apk/$name.apk（${"%.1f".format(dst.length() / 1048576f)}MB）")
+        dst
     }
 
-    /** 清掉浮窗（结束后用户叉掉）。 */
+    /** 取消当前分析（杀不掉 native，但能停掉轮询与流收集；浮窗显示已取消）。 */
+    fun cancel() {
+        job?.cancel()
+        job = null
+        _state.value = _state.value.copy(running = false, resultSummary = "已取消")
+    }
+
+    /** 关闭浮窗（重置回 IDLE）。 */
     fun dismiss() {
+        job?.cancel()
+        job = null
         _state.value = BlutterUiState.idle()
     }
 
-    /** 按日志行猜测阶段（浮窗展示用，非精确）。 */
     private fun phaseOf(line: String): BlutterPhase = when {
-        line.contains("blutter 分析开始", true) -> BlutterPhase.RUNNING
-        // 只在真正开始装包时报"环境自愈"（正常镜像依赖已齐，setup.sh 秒过不产生这些行）
         line.contains("pip3 install", true) || line.contains("apt-get install", true) ||
             line.contains("Collecting", true) || line.contains("Downloading", true) -> BlutterPhase.PREPARE_ENV
         line.contains("cmake", true) || line.contains("ninja", true) ||
-            line.contains("Compiling", true) || line.contains("Building", true) -> BlutterPhase.BUILDING
-        line.contains("pp.txt", true) || line.contains("objs.txt", true) ||
-            line.contains("asm/", true) -> BlutterPhase.DUMPING
-        else -> _state.value.phase
+            line.contains("Configuring", true) || line.contains("Building", true) -> BlutterPhase.BUILDING
+        line.contains("pp.txt", true) || line.contains("asm/", true) ||
+            line.contains("objs.txt", true) || line.contains("分析完成", true) -> BlutterPhase.PRODUCING
+        else -> BlutterPhase.ANALYZING
     }
 }
 
-/** 分析路线（预留 Runner 快通道）。 */
+/** 分析路线：内置 Runner So 快通道 / 容器编译慢通道。 */
 enum class BlutterRoute { RUNNER_SO, CONTAINER_BUILD }
 
-/** 分析阶段（浮窗标题/进度展示）。 */
+/** 分析阶段（浮窗标题/进度胶囊展示）。 */
 enum class BlutterPhase(val label: String) {
     IDLE(""),
     PREPARING("准备中"),
     PREPARE_ENV("环境自愈（可能联网装依赖）"),
-    RUNNING("Blutter 解析中"),
+    ANALYZING("Blutter 解析中"),
     BUILDING("编译 Dart 快照解析器"),
-    DUMPING("产出分析结果"),
+    PRODUCING("产出分析结果"),
     DONE("分析完成"),
     FAILED("分析失败")
 }

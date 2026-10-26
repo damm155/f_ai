@@ -10,6 +10,13 @@
 #   aicode-so strings <so> [正则]          ← so_strings
 #   aicode-so cfg     <so> <地址或符号>     ← 控制流图
 #
+#   补丁柜（持久 /root/patches/，patch 写入时自动记录）：
+#     aicode-so patch-list [so名] / patch-read <id> / patch-status <id> <active|broken|superseded|failed> [备注]
+#     aicode-so patch-rollback <id|all> / patch-delete <id>
+#   知识库（持久 /root/knowledge/）：
+#     aicode-so exp-save "<摘要>" [详情] [关键词] [apk] [任务] [success|failed] [1-5]
+#     aicode-so exp-query [关键词...]
+#
 #   patch_so（完整版，asm/hex 双模式 + 分支重定位 + .bak 备份）：
 #     python3 /root/flutter-re/patch_so.py <so> <addr> "asm 指令; 分号续"   ← patch_so（asm 模式）
 #     python3 /root/flutter-re/patch_so.py <so> <addr> --bytes "20 00 80 52" ← patch_so（hex 模式）

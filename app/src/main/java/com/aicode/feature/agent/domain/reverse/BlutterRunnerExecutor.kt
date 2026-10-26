@@ -99,7 +99,7 @@ class BlutterRunnerExecutor @Inject constructor(
                                 var ok = true
                                 for (b in h) {
                                     val c = b.toInt().toChar()
-                                    if (!((c in '0'..'9') || (c in 'a'..'g'))) { ok = false; break }
+                                    if (!((c in '0'..'9') || (c in 'a'..'f'))) { ok = false; break }
                                 }
                                 if (ok) out.add(String(h))
                             }
@@ -116,8 +116,10 @@ class BlutterRunnerExecutor @Inject constructor(
     /** hash → runner；未命中/null 返回 null。黑名单内的直接跳过。 */
     fun selectRunner(hashes: Set<String>): Runner? {
         if (hashes.isEmpty()) return null
+        // 归一化比较（trim + 小写）：提取端与注册表任一侧的格式漂移都不应导致漏配
+        val norm = hashes.map { it.trim().lowercase() }.toSet()
         return runnerList().firstOrNull { r ->
-            r.supported && r.snapshotHashes.any { it in hashes } && r.library !in blacklisted
+            r.supported && r.snapshotHashes.any { it.trim().lowercase() in norm } && r.library !in blacklisted
         }
     }
 
@@ -141,7 +143,15 @@ class BlutterRunnerExecutor @Inject constructor(
         onLog("✓ Dart snapshot hash: ${hashes.take(2).joinToString()}")
         val runner = selectRunner(hashes)
         if (runner == null) {
-            onLog("⚠ hash 未命中内置 Runner（Dart 版本不在 2.14.0–3.12.0 或已拉黑）")
+            val all = runnerList()
+            val blackHit = all.firstOrNull { it.library in blacklisted && it.snapshotHashes.any { h -> h in hashes } }
+            onLog("⚠ hash 未命中内置 Runner（提取=${hashes.joinToString()}，注册表=${all.size} 条，" +
+                "黑名单=${blacklisted.joinToString().ifEmpty { "空" }}）")
+            if (blackHit != null) {
+                onLog("　→ 实际是被拉黑：${blackHit.library}（Dart ${blackHit.dartVersion}）；重进应用可清黑名单重试")
+            } else {
+                onLog("　→ Dart 版本不在内置覆盖范围（2.14.0–3.12.0），走容器编译路线")
+            }
             return null
         }
         onLog("✓ 命中内置 Runner：${runner.library}（Dart ${runner.dartVersion}），启动 :blutter 进程…")

@@ -530,3 +530,37 @@ rizin 对 blutter 编译分析无用（ELF 分析已由 so_tool + binutils 覆�
 **处理**：选 Flutter **只启动解析，零消息发出**（浮窗展示进度/结果，用户看完自己提问）；
 选普通应用才发路由指令（无本地解析环节）。
 
+
+---
+
+## 十三、r11：补丁柜 + 知识库（容器侧，FBox AI 工具链对齐收官）
+
+r8 会话记录（AI 实测）证实：aicode 全家/patch_so/apkSign/补丁柜底层均可用，缺的只有
+「补丁柜 5 工具 + 知识库 2 工具」这两个**文件型**能力（bind mount 已就位，做出来即持久化）；
+任务类 3 工具（create_task_plan 等）确认**不移植**——AiCode 的 `todo`/`askUserQuestion`
+是 App 一等工具且更强，容器脚本无通道也不需要通道。
+
+### 13.1 补丁柜（so_tool.py 新增 5 子命令）
+- `patch` 写补丁成功后**自动入柜**：`/root/patches/<so名>/<时间戳>_<addr>.json`
+  （记录 so/orig/时间/状态/备注/每处 addr+offset+old+new）
+- `patch-list [so名]`：状态符号 ●active ✗broken ⚪superseded
+- `patch-read <id>`：完整 JSON
+- `patch-status <id> <active|broken|superseded|failed> [备注]`
+- `patch-rollback <id|all>`：恢复 .orig + 清记录（`all`=回滚全部涉及 so）
+- `patch-delete <id>`：仅删记录
+- 全流程实测：patch→入柜→list→read→status→rollback→so 还原 ✓
+
+### 13.2 知识库（so_tool.py 新增 2 子命令，格式与 FBox 一致）
+- `exp-save "<摘要>" [详情] [关键词] [apk] [任务] [success|failed] [1-5]` → `/root/knowledge/<id>.json`
+- `exp-query [关键词...]`：summary/details/keywords/apk/task 全字段打分排序；无参=最近 10 条
+- 实测 ✓（容器里已有 FBox 时代 10 条经验，exp-query 直接可用）
+
+### 13.3 提示词/包装更新
+- `80-reverse-engineering.md`：映射表加补丁柜/知识库两行；铁律新增第 7/8 条
+  （补丁必须入柜管理、任务结束沉淀经验）
+- `aicode-so` 注释同步
+
+### 13.4 至此 FBox AI 工具链对齐完成度
+- 容器侧：✅ 全部（apk 全家/so 全家/blutter 四件套/patch_so/补丁柜/知识库）
+- App 侧：✅ apkSign / 类型判定弹窗 / Blutter 浮窗（Runner 快通道+容器编译双路线）
+- 不移植（有更强替代）：任务 3 件套→`todo`；提问→`askUserQuestion`；OCR→`viewImage`/识图模型

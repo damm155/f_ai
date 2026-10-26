@@ -19,6 +19,8 @@
 | SO 补丁（轻量 hex + 整文件回滚） | `aicode-so patch <so> <addr:hex> [--dry]` / `patch <so> --restore`（.orig 备份） | （patch_so 简化版 / rollback） |
 | Flutter Dart AOT 分析（容器编译路线） | `aicode-blutter <apk> [out]` | start_analysis |
 | **APK 签名（v1+v2，产出可安装包）** | **`apkSign` 工具**（App 侧，非 shell 命令） | apk_sign |
+| **补丁柜（跨会话持久）** | `aicode-so patch-list` / `patch-read <id>` / `patch-status <id> <active\|broken\|superseded\|failed> [备注]` / `patch-rollback <id\|all>` / `patch-delete <id>`；`aicode-so patch` 写补丁时**自动入柜** | list_patches / read_patch / patch_status / rollback_patch / delete_patch |
+| **知识库（跨会话持久）** | `aicode-so exp-save "<摘要>" [详情] [关键词] [apk] [任务] [success\|failed] [1-5]` / `aicode-so exp-query [关键词...]`；落 `/root/knowledge/` | save_experience / query_experience |
 
 每个命令都支持 `--help`，**先用 `--help` 或上述用法确认参数，不要臆造参数**。
 
@@ -50,7 +52,12 @@
    严禁重跑 `aicode-blutter`（重跑几分钟起）。`ls /root/out` 先查。
 6. **明确结论分级**：向用户汇报时区分「事实（命令输出直接可见）」「推断（多证据推理）」「猜测（未验证）」，
    禁止把猜测当结论。
-7. **交付可安装包的标准链路**（缺签名用户装不上，务必走完）：
+7. **补丁必须入柜管理**：`aicode-so patch` 成功后自动写入补丁柜（`/root/patches/`，跨会话持久）。
+   用户反馈补丁崩溃 → 先 `aicode-so patch-status <id> broken "<现象>"`，再分析原因；修好后旧补丁标
+   `superseded`。回滚用 `patch-rollback <id>`（恢复 .orig 并清记录）。给用户报告补丁状态时引用记录 id。
+8. **任务结束沉淀经验**：分析出关键函数/地址/有效路径后 `aicode-so exp-save`；下次任务开始前
+   `aicode-so exp-query <关键词>` 先查历史，避免重复踩坑。失败经验同样要记（result=failed）。
+9. **交付可安装包的标准链路**（缺签名用户装不上，务必走完）：
    ```
    aicode-apk rebuild <改过的.apk> <out.apk>   # reapk 重打包，已 zipalign，但【未签名】
    apkSign apk=<out.apk>                        # 签名 + 自校验（内置 keystore）
@@ -59,6 +66,6 @@
    `apkSign` 的输出里带 `hostPath` / `apk`（容器路径）两种形式，`sendFile` 用容器路径即可。
    若设备已装同包名但签名不同的应用，需提示用户先卸载。）
 
-8. **改 dex/manifest 之前先备份原包**：`aicode-apk` 的 patch 子命令会原地改写 APK，
+10. **改 dex/manifest 之前先备份原包**：`aicode-apk` 的 patch 子命令会原地改写 APK，
    建议先 `cp` 一份到 `/root/work/`。所有补丁/签名产物都放 `/root/out/` 或 `/root/work/`。
-9. **别把工作区当垃圾场**：临时脚本、中间产物放 `/root/work/`；不要在 `/root` 根下或工作区里乱写文件。
+11. **别把工作区当垃圾场**：临时脚本、中间产物放 `/root/work/`；不要在 `/root` 根下或工作区里乱写文件。

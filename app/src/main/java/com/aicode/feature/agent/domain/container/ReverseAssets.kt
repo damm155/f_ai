@@ -131,6 +131,9 @@ class ReverseAssets @Inject constructor(
 
         val apkTool = apkToolDir(profile)
         val marker = File(apkTool, ".version")
+        // w.js 由 runner so 在 native 侧按绝对路径打开，不随 rootfs 重装消失；
+        // 它的校验必须排在版本闸门之前——否则老用户 marker 命中就直接 return，新版补的 w.js 永远落不了盘。
+        ensureWjs()
         // 就绪判断必须是**纯检查**（不能带安装副作用），否则会漏装后续资产。
         // 校验真实文件而非只信 marker：rootfs 若被重装，marker 随 rootfs 一起消失，自然触发重解。
         val flutterReReady = FLUTTER_RE_REQUIRED.all { File(flutterReDir(profile), it).isFile }
@@ -152,7 +155,6 @@ class ReverseAssets @Inject constructor(
             installApkTool(profile)
             installSoTool(profile)
             installFlutterReHealing(profile)
-            ensureWjs()
             installSkills()
             installBlutterConfig()
             marker.parentFile?.mkdirs()
@@ -245,9 +247,11 @@ class ReverseAssets @Inject constructor(
     private fun ensureWjs() {
         runCatching {
             val f = File(context.filesDir, "w.js")
-            if (!f.isFile) {
+            if (!f.isFile || f.length() < 100L) {
                 f.parentFile?.mkdirs()
-                f.writeText("// w.js placeholder (frida output channel)\n")
+                // FBox 原版模板（11.9KB，用户可编辑的 frida hook 脚本；runner 生成
+                // blutter_frida.js 时以其为底）。空占位会让动态跟踪输出为空脚本。
+                copyAssetFile("$ASSET_DIR/w.js", f)
             }
         }
     }

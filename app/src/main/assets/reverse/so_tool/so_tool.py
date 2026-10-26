@@ -21,6 +21,7 @@ so 路径为容器内绝对路径（如 /root/out/libxxx.so 或 /root/apk/xxx/li
 import os
 import re
 import sys
+import json
 import shutil
 
 try:
@@ -663,6 +664,91 @@ def cmd_cfg(args):
     print("提示: 用 so_disasm <so> <addr> 查看某块指令细节；分支目标地址可直接作 patch_so address。")
 
 
+# ============================================================ 知识库（/root/knowledge/，持久 bind）
+# 对齐 FBox 的 save_experience / query_experience。跨会话积累逆向经验，文件格式与 FBox 一致：
+#   {id, time, apk, task, summary, details, keywords, result, rate}
+# 检索：summary/details/keywords/apk/task 全字段大小写不敏感关键词打分，按命中数排序。
+
+KB_DIR = "/root/knowledge"
+
+
+def cmd_exp_save(args):
+    """exp-save <摘要> [详细过程] [关键词逗号分隔] [apk名] [任务类型] [结果success|failed] [评分1-5]
+
+    例：exp-save "会员状态由 isVip() 控制" "定位: dex-strings 搜 isVip → refs → method 反汇编…" \
+        "isVip,vip,会员" "JavDB.apk" "解锁会员" success 5
+    """
+    if not args:
+        sys.exit("✗ 缺少摘要")
+    import time as _t
+    now = _t.localtime()
+    rid = _t.strftime("%Y%m%d_%H%M%S") + ("_%03d" % (_t.time() % 1000))
+    rec = {
+        "id": rid,
+        "time": _t.strftime("%Y-%m-%d %H:%M:%S", now),
+        "apk": args[3] if len(args) > 3 else "",
+        "task": args[4] if len(args) > 4 else "分析流程",
+        "summary": args[0],
+        "details": args[1] if len(args) > 1 else "",
+        "keywords": args[2] if len(args) > 2 else "",
+        "result": (args[5] if len(args) > 5 else "success"),
+        "rate": int(args[6]) if len(args) > 6 else 3,
+    }
+    if rec["result"] not in ("success", "failed"):
+        rec["result"] = "success"
+    rec["rate"] = max(1, min(5, rec["rate"]))
+    os.makedirs(KB_DIR, exist_ok=True)
+    path = os.path.join(KB_DIR, rid + ".json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(rec, f, ensure_ascii=False, indent=1)
+    print("✓ 经验已入库：%s（共 %d 条）" % (rid, len(os.listdir(KB_DIR))))
+    _finish(0)
+
+
+def cmd_exp_query(args):
+    """exp-query [关键词...]   检索经验（多关键词=OR，按命中字段数排序；无参=最近 10 条）"""
+    if not os.path.isdir(KB_DIR):
+        print("（知识库为空：%s 不存在）" % KB_DIR)
+        _finish(0)
+    recs = []
+    for fn in os.listdir(KB_DIR):
+        if not fn.endswith(".json"):
+            continue
+        try:
+            recs.append(json.load(open(os.path.join(KB_DIR, fn), encoding="utf-8")))
+        except Exception:
+            pass
+    if not recs:
+        print("（知识库为空）")
+        _finish(0)
+    kws = [k.lower() for k in args if k.strip()]
+    if kws:
+        def score(r):
+            hay = " ".join(str(r.get(f, "")) for f in
+                           ("summary", "details", "keywords", "apk", "task")).lower()
+            return sum(1 for k in kws if k in hay)
+        scored = [(score(r), r) for r in recs]
+        scored = [t for t in scored if t[0] > 0]
+        scored.sort(key=lambda t: (-t[0], t[1].get("time", "")))
+        picked = scored
+        if not picked:
+            print("无命中（%d 条经验里找不到 %s）。可换关键词或省略参数看最近记录。" % (len(recs), " ".join(kws)))
+            _finish(0)
+    else:
+        picked = [(0, r) for r in sorted(recs, key=lambda r: r.get("time", ""), reverse=True)[:10]]
+    for sc, r in picked[:10]:
+        print("[%s] %s | %s | %s | %s/5" % (
+            r.get("result", "?"), r.get("id", "?"), r.get("apk") or "-",
+            r.get("task") or "-", r.get("rate", "?")))
+        print("  摘要: %s" % r.get("summary", ""))
+        if r.get("details"):
+            print("  详情: %s" % r["details"][:400])
+        if r.get("keywords"):
+            print("  关键词: %s" % r["keywords"])
+        print()
+    _finish(0)
+
+
 # ---------------------------------------------------------------- 入口
 
 # ============================================================ patch（写字节补丁）
@@ -743,6 +829,171 @@ def cmd_patch(args):
             f.seek(off)
             f.write(data)
     print("✓ 已写入 %d 处补丁 → %s" % (len(plan), path))
+    try:
+        rid = _record_patch(path, plan)
+        print("✓ 已记入补丁柜：%s（patch-list 查看 / patch-status 改状态 / patch-rollback 回滚）" % rid)
+    except Exception as e:
+        print("⚠ 补丁柜记录失败（不影响补丁本身）: %s" % e)
+    _finish(0)
+
+
+# ============================================================ 补丁柜（/root/patches/，持久 bind）
+# 对齐 FBox 的 list_patches / read_patch / patch_status / rollback_patch / delete_patch。
+# 目录结构：/root/patches/<so文件名去扩展>/<时间戳>_<addr>.json
+# 记录内容：目标 so、虚拟地址/文件偏移、原始字节、新字节、.orig 路径、状态(active/broken/superseded/failed)、备注
+
+PATCH_CABINET_DIR = "/root/patches"
+
+def _cabinet_dir_for(so_path: str) -> str:
+    base = os.path.splitext(os.path.basename(so_path))[0]
+    d = os.path.join(PATCH_CABINET_DIR, base)
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _record_patch(so_path: str, patches: list) -> str:
+    """patch 成功写入后调用：一次记录一条 JSON（一个补丁批次）。返回记录 id。"""
+    import time as _t
+    ts = _t.strftime("%Y%m%d_%H%M%S")
+    d = _cabinet_dir_for(so_path)
+    rid = "%s_%s" % (ts, ("_".join("%x" % a for a, *_ in patches[:2]))[:24])
+    rec = {
+        "id": rid,
+        "so": so_path,
+        "orig": so_path + ".orig",
+        "time": _t.strftime("%Y-%m-%d %H:%M:%S"),
+        "status": "active",
+        "note": "",
+        "patches": [
+            {"addr": "0x%x" % a, "offset": "0x%x" % o,
+             "old": old.hex(" "), "new": dat.hex(" ")}
+            for a, o, old, dat, _sec in patches
+        ],
+    }
+    with open(os.path.join(d, rid + ".json"), "w", encoding="utf-8") as f:
+        json.dump(rec, f, ensure_ascii=False, indent=1)
+    return rid
+
+
+def _load_record(rid_or_path: str):
+    """按 id 或直接路径读补丁记录。返回 (rec, path) 或 (None, None)。"""
+    p = rid_or_path
+    if not p.endswith(".json"):
+        # 在柜子里搜
+        hits = []
+        if os.path.isdir(PATCH_CABINET_DIR):
+            for sub in os.listdir(PATCH_CABINET_DIR):
+                cand = os.path.join(PATCH_CABINET_DIR, sub, rid_or_path + ".json")
+                if os.path.isfile(cand):
+                    hits.append(cand)
+        if not hits:
+            return None, None
+        p = hits[0]
+    if not os.path.isfile(p):
+        return None, None
+    try:
+        return json.load(open(p, encoding="utf-8")), p
+    except Exception:
+        return None, None
+
+
+def cmd_patch_list(args):
+    """patch-list [so文件名]   列出补丁记录（不传 = 全部）"""
+    if not os.path.isdir(PATCH_CABINET_DIR):
+        print("（补丁柜为空：%s 不存在）" % PATCH_CABINET_DIR)
+        _finish(0)
+    subs = sorted(os.listdir(PATCH_CABINET_DIR))
+    want = args[0] if args else None
+    total = 0
+    for sub in subs:
+        if want and want not in sub:
+            continue
+        sdir = os.path.join(PATCH_CABINET_DIR, sub)
+        for fn in sorted(os.listdir(sdir)):
+            if not fn.endswith(".json"):
+                continue
+            rec, _ = _load_record(os.path.join(sdir, fn))
+            if not rec:
+                continue
+            total += 1
+            addrs = ", ".join(p["addr"] for p in rec["patches"])
+            mark = {"active": "●", "broken": "✗", "superseded": "⚪", "failed": "✗"}.get(rec.get("status"), "·")
+            print("%s %s  %s  [%s]  %s%s" % (
+                mark, rec["id"], rec.get("time", ""),
+                rec.get("status", "?"), addrs,
+                ("  // " + rec["note"]) if rec.get("note") else ""))
+    print(("\n共 %d 条记录" % total) if total else "（无记录）")
+    _finish(0)
+
+
+def cmd_patch_read(args):
+    """patch-read <记录id>   查看一条补丁记录详情"""
+    rec, path = _load_record(args[0])
+    if not rec:
+        sys.exit("✗ 找不到补丁记录: %s" % args[0])
+    print(json.dumps(rec, ensure_ascii=False, indent=1))
+    _finish(0)
+
+
+def cmd_patch_status(args):
+    """patch-status <记录id> <active|broken|superseded|failed> [备注]"""
+    rec, path = _load_record(args[0])
+    if not rec:
+        sys.exit("✗ 找不到补丁记录: %s" % args[0])
+    st = args[1]
+    if st not in ("active", "broken", "superseded", "failed"):
+        sys.exit("✗ 状态必须是 active|broken|superseded|failed")
+    rec["status"] = st
+    if len(args) > 2:
+        rec["note"] = args[2]
+    json.dump(rec, open(path, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+    print("✓ %s 状态 → %s%s" % (rec["id"], st, ("（" + rec["note"] + "）") if rec.get("note") else ""))
+    _finish(0)
+
+
+def cmd_patch_rollback(args):
+    """patch-rollback <记录id|all>   按记录回滚（恢复 .orig 到 so，并清全部该 so 的记录）"""
+    if args[0] == "all":
+        # 回滚所有记录涉及的 so（按 .orig 恢复，清记录）
+        if not os.path.isdir(PATCH_CABINET_DIR):
+            sys.exit("✗ 补丁柜为空")
+        dones = set()
+        for sub in os.listdir(PATCH_CABINET_DIR):
+            sdir = os.path.join(PATCH_CABINET_DIR, sub)
+            for fn in os.listdir(sdir):
+                rec, p = _load_record(os.path.join(sdir, fn))
+                if rec and rec["so"] not in dones:
+                    orig = rec["orig"]
+                    if os.path.isfile(orig):
+                        shutil.copyfile(orig, rec["so"])
+                        shutil.rmtree(sdir, ignore_errors=True)
+                        print("✓ 已回滚 %s（清 %s）" % (rec["so"], sub))
+                        dones.add(rec["so"])
+        print("完成，共回滚 %d 个 so" % len(dones))
+        _finish(0)
+    rec, path = _load_record(args[0])
+    if not rec:
+        sys.exit("✗ 找不到补丁记录: %s" % args[0])
+    orig = rec["orig"]
+    if not os.path.isfile(orig):
+        sys.exit("✗ .orig 备份不存在: %s（无法回滚）" % orig)
+    shutil.copyfile(orig, rec["so"])
+    sdir = os.path.dirname(path)
+    shutil.rmtree(sdir, ignore_errors=True)
+    print("✓ 已回滚 %s ← %s（补丁记录已清：%s）" % (rec["so"], orig, sdir))
+    _finish(0)
+
+
+def cmd_patch_delete(args):
+    """patch-delete <记录id>   仅删除记录（不动 so）"""
+    rec, path = _load_record(args[0])
+    if not rec:
+        sys.exit("✗ 找不到补丁记录: %s" % args[0])
+    os.remove(path)
+    sdir = os.path.dirname(path)
+    if not os.listdir(sdir):
+        os.rmdir(sdir)
+    print("✓ 已删除记录 %s（so 未动）" % args[0])
     _finish(0)
 
 
@@ -760,6 +1011,13 @@ def cmd_patch_restore(args):
 
 COMMANDS = {
     "patch": (cmd_patch, 2, "<so> <addr:hex>[:addr:hex...] [--dry]"),
+    "patch-list": (cmd_patch_list, 0, "[so文件名]"),
+    "patch-read": (cmd_patch_read, 1, "<记录id>"),
+    "patch-status": (cmd_patch_status, 2, "<记录id> <active|broken|superseded|failed> [备注]"),
+    "patch-rollback": (cmd_patch_rollback, 1, "<记录id|all>"),
+    "patch-delete": (cmd_patch_delete, 1, "<记录id>"),
+    "exp-save": (cmd_exp_save, 1, "<摘要> [详情] [关键词] [apk] [任务类型] [success|failed] [评分1-5]"),
+    "exp-query": (cmd_exp_query, 0, "[关键词...]"),
     "info": (cmd_info, 1, "<so>"),
     "symbols": (cmd_symbols, 1, "<so> [grep]"),
     "jni": (cmd_jni, 1, "<so>"),

@@ -22,6 +22,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -208,16 +209,18 @@ internal fun BlutterProgressCard(
                         color = colors.surfaceVariant,
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Text(
-                            text = state.log.takeLast(8000),
-                            style = MaterialTheme.typography.bodySmall,
-                            fontFamily = FontFamily.Monospace,
-                            color = colors.onSurfaceVariant,
-                            modifier = Modifier
-                                .padding(Spacing.sm)
-                                .heightIn(max = 200.dp)
-                                .verticalScroll(rememberScrollState())
-                        )
+                        SelectionContainer {
+                            Text(
+                                text = state.log.takeLast(8000),
+                                style = MaterialTheme.typography.bodySmall,
+                                fontFamily = FontFamily.Monospace,
+                                color = colors.onSurfaceVariant,
+                                modifier = Modifier
+                                    .padding(Spacing.sm)
+                                    .heightIn(max = 200.dp)
+                                    .verticalScroll(rememberScrollState())
+                            )
+                        }
                     }
                 }
             }

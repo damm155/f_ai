@@ -1,0 +1,30 @@
+#!/bin/sh
+# 逆向：APK 原生工具链（AndroidManifest 查改 + DEX 字符串/引用/反汇编/补丁 + 重打包）。
+# 移植自 FBox（资产由 ReverseAssets 按需解压到 /root/apk-tool）。
+#
+# 与 FBox 的 apk_* 工具一一对应：
+#   aicode-apk info          <apk>                              ← apk_manifest(get)
+#   aicode-apk manifest-edit <apk> debuggable=1,cleartext=1,perm=android.permission.X --out <out.apk>
+#                                                              ← apk_manifest(edit)
+#   aicode-apk dex-strings   <apk> <正则>                       ← apk_dex_search(strings)
+#   aicode-apk dex-refs      <apk> <正则>                       ← apk_dex_search(refs)
+#   aicode-apk dex-class     <apk> <类描述符>                    ← apk_dex_inspect(class)
+#   aicode-apk dex-method    <apk> <类描述符> <方法名>            ← apk_dex_inspect(method)
+#   aicode-apk dex-fields    <apk> <类描述符>                    ← apk_dex_fields
+#   aicode-apk dex-return    <apk> <类> <方法> true|false|null|void   ← apk_dex_patch(return)
+#   aicode-apk dex-smali     <apk> <类> <方法> <smali文件>       ← apk_dex_patch(smali)
+#   aicode-apk dex-string-edit <apk> <旧串> <新串> --out <out.apk> ← apk_dex_patch(string)
+#   aicode-apk dex-xref      <apk> <method|field|type> <目标>    ← 交叉引用
+#   aicode-apk resource-read <apk> <locator>...                 ← 读资源
+#   aicode-apk rebuild       <apk> <out.apk>                    ← 重打包（未签名，见 a 注）
+#
+# 注：rebuild 产出**未签名** APK；签名见 App 侧（或后续 aicode-sign）。
+# apk_tool.py 与依赖包 reapk 同在 /root/apk-tool，Python 会自动把脚本目录加入 sys.path。
+# 依赖自检：Alpine 镜像默认不带 python3（Debian 镜像已预装 python3 + capstone + g++）
+command -v python3 >/dev/null 2>&1 || {
+    echo "✗ 容器内没有 python3。" >&2
+    echo "  逆向工具链需要 Debian 镜像（内置 debian-rootfs.bin）。" >&2
+    echo "  若当前是 Alpine：apk add python3（仅 apk_tool 可用，so_tool 还需 py3-capstone）。" >&2
+    exit 127
+}
+exec python3 /root/apk-tool/apk_tool.py "$@"

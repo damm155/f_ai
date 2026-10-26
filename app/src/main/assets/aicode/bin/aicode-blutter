@@ -1,0 +1,51 @@
+#!/bin/sh
+# 逆向：Flutter Dart AOT 分析（blutter 的**容器编译路线**，慢）。
+#
+# 三条路线的关系（对齐 FBox）：
+#   ① 快通道（App 侧 JNI 跑预编译 runner）——需 App 集成 BlutterRunnerService，见移植文档第 6 项；
+#   ② 本命令（容器内现场 cmake/ninja 编译）——万金油，但首次某 Dart 版本要联网拉 SDK，可能十几分钟；
+#   ③ 兜底：用 aicode-so 直接静态分析 libapp.so（无需 blutter 还原函数名也能改字节）。
+#
+# 用法：
+#   aicode-blutter <apk路径> [输出目录]
+#   输出（默认 /root/out/<apk 名>/）：pp.txt 常量池/类名、asm/ Dart 反汇编、objs.txt 对象结构
+#
+# 兼容性提示：容器内这套 blutter 源码工具链对新版 Dart 适配有限（双→单快照、Closure 布局等），
+# 失败时日志会给出指引，请退到路线 ③。
+set -u
+
+[ $# -ge 1 ] || { echo "用法: aicode-blutter <apk路径> [输出目录]" >&2; exit 2; }
+APK="$1"
+NAME=$(basename "$APK" | sed 's/\.apk$//')
+OUT="${2:-/root/out/$NAME}"
+RE=/root/flutter-re
+
+if [ ! -f "$RE/blutter/blutter.py" ]; then
+    echo "✗ 工具链缺失：$RE/blutter/blutter.py" >&2
+    echo "  → 逆向资产尚未释放。请先在 App 内进入一次容器（触发 ReverseAssets.ensureInstalled），" >&2
+    echo "    或检查 assets/reverse/flutter-re.tar 是否随包打了进去。" >&2
+    exit 3
+fi
+
+if [ ! -f "$APK" ]; then
+    echo "✗ 找不到目标：$APK" >&2
+    exit 2
+fi
+
+mkdir -p "$OUT"
+
+# ① 环境自愈（幂等：缺 g++/cmake/ninja/pyelftools 才会装）
+if [ -f "$RE/setup.sh" ]; then
+    sh "$RE/setup.sh" || echo "⚠ setup.sh 返回非 0，继续尝试分析" >&2
+fi
+
+# ② gcc13 适配补丁（存在才打；FBox 各版本命名不一，故用通配避免踩命名坑）
+for p in "$RE"/*gcc13_fix.py; do
+    [ -f "$p" ] && python3 "$p" || true
+done
+
+# ③ 直接把 **APK 路径**传给 blutter.py：它自己会 extract_libs_from_apk。
+#    切勿传"解压根目录"——find_lib_files() 找不到 libapp.so 会 exit 1，看起来像编译失败。
+echo "▶ blutter 分析开始：$APK → $OUT"
+echo "  （首次分析某个 Dart 版本需联网拉取 Dart SDK，可能耗时十几分钟）"
+exec python3 "$RE/blutter/blutter.py" "$APK" "$OUT"

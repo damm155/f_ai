@@ -1,0 +1,26 @@
+#!/bin/sh
+# 逆向：原生 SO 工具链（ELF 摘要 / 符号 / JNI 动态注册 / 反汇编 / 字符串）、以及打补丁。
+# 移植自 FBox（资产由 ReverseAssets 按需解压到 /root/so-tool）。
+#
+# 与 FBox 的 so_* 工具一一对应：
+#   aicode-so info    <so>                 ← so_info     （架构/位数/PIE/NX/RELRO/节区/DT_NEEDED）
+#   aicode-so symbols <so> [正则]          ← so_symbols  （函数符号表；Java_ 开头的 JNI 自动标注）
+#   aicode-so jni     <so>                 ← so_jni      （RegisterNatives 动态注册三方组还原）
+#   aicode-so disasm  <so> <地址或符号> [字节数]  ← so_disasm
+#   aicode-so strings <so> [正则]          ← so_strings
+#   aicode-so cfg     <so> <地址或符号>     ← 控制流图
+#
+# 反汇编示例：aicode-so disasm libapp.so 0x1a2b3c 64
+# 移植自 FBox（资产由 ReverseAssets 按需解压到 /root/so-tool）。
+# 依赖自检：so_tool 需要 python3 + capstone（Debian 镜像已预装 capstone 5.0.7）
+command -v python3 >/dev/null 2>&1 || {
+    echo "✗ 容器内没有 python3。逆向工具链需要 Debian 镜像（内置 debian-rootfs.bin）。" >&2
+    echo "  Alpine 下需：apk add python3 py3-capstone" >&2
+    exit 127
+}
+python3 -c "import capstone" 2>/dev/null || {
+    echo "✗ python3 缺 capstone 模块（so_* 反汇编依赖）。" >&2
+    echo "  Debian：apt-get install -y python3-capstone    Alpine：apk add py3-capstone" >&2
+    exit 126
+}
+exec python3 /root/so-tool/so_tool.py "$@"

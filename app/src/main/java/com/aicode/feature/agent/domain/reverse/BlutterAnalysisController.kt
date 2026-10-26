@@ -48,12 +48,6 @@ class BlutterAnalysisController @Inject constructor(
     /** 宿主 rootfs 根（容器内 / 的实体；容器 /root 即其 root/ 子目录）。 */
     private fun hostRootfs(): File = File(context.filesDir, "rootfs")
 
-    private companion object {
-        const val TAG = "BlutterAnalysis"
-
-        /** 慢通道首次分析某 Dart 版本要现场拉 SDK + 编译，放宽到 40 分钟。 */
-        const val TIMEOUT_MS = 40L * 60 * 1000
-    }
 
     private suspend fun <T> withContextIO(block: () -> T): T =
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { block() }
@@ -98,7 +92,7 @@ class BlutterAnalysisController @Inject constructor(
             }
             try {
                 // ── 预置 APK：宿主侧直接复制（附件 ↔ rootfs/root/apk/ 之间），零 shell ──
-                val hostApk = withContextIO { stageApk(apkContainerPath, name, ::append) }
+                val hostApk = stageApk(apkContainerPath, name, ::append)
                 if (hostApk == null) {
                     _state.value = _state.value.copy(
                         running = false,

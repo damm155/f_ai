@@ -34,13 +34,6 @@ class BlutterAnalysisController @javax.inject.Inject constructor(
     /** App 侧直接可写的宿主 rootfs 根（容器内 / 的实体；容器内 /root 即其 root/ 子目录）。 */
     private fun hostRootfs(): File = File(context.filesDir, "rootfs")
 
-    private companion object {
-        const val TAG = "BlutterAnalysis"
-
-        /** 慢通道首次分析某 Dart 版本要现场拉 SDK + 编译，放宽到 40 分钟。 */
-        const val TIMEOUT_MS = 40L * 60 * 1000
-    }
-
     private suspend fun <T> withContextIO(block: () -> T): T =
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { block() }
 

@@ -152,6 +152,7 @@ class ReverseAssets @Inject constructor(
             installApkTool(profile)
             installSoTool(profile)
             installFlutterReHealing(profile)
+            ensureWjs()
             installSkills()
             installBlutterConfig()
             marker.parentFile?.mkdirs()
@@ -233,6 +234,21 @@ class ReverseAssets @Inject constructor(
             val src = "$ASSET_DIR/skills/$id/SKILL.md"
             if (!assetExists(src)) return@forEach
             copyAssetFile(src, File(File(base, id), "SKILL.md"))
+        }
+    }
+
+    /**
+     * MINIS-PORT 坑④配套：runner so 内嵌的 w.js 路径已在打包期二进制补丁为
+     * `/data/data/com.aicode/files/w.js`，但文件本体必须存在（frida 输出通道，
+     * native 侧按需打开）。空占位即可。
+     */
+    private fun ensureWjs() {
+        runCatching {
+            val f = File(context.filesDir, "w.js")
+            if (!f.isFile) {
+                f.parentFile?.mkdirs()
+                f.writeText("// w.js placeholder (frida output channel)\n")
+            }
         }
     }
 

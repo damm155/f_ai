@@ -515,3 +515,18 @@ rizin 对 blutter 编译分析无用（ELF 分析已由 so_tool + binutils 覆�
     ├─ 命中 → startService(:blutter) → JNI nativeRun → 轮询 result JSON → /root/out/<名>/
     └─ 未命中/崩 → 拉黑 → 慢通道 aicode-blutter（容器编译）
 ```
+
+### 12.5 r7 修复：Runner 快通道首测失败的根因与处理
+
+**现象**（用户真机首测）：选 Flutter → 浮窗报分析失败，且路由消息被发出。
+
+**根因 1（致命）**：MINIS-PORT 坑④实锤——runner so 内嵌
+`/data/data/com.zuimo.fbox/files/w.js`，AiCode 包名是 `com.aicode`，路径不存在 → native 失败。
+**处理**：打包期对 18 个 runner 做**等长二进制替换**
+（`com.zuimo.fbox` → `com.aicode` + NUL 补齐，18/18 全部替换并抽查通过）；
+另加 `ReverseAssets.ensureWjs()` 确保 `filesDir/w.js` 文件本体存在。
+
+**根因 2（设计）**：违背 MINIS-PORT 第 5 轮修正——「解析完自动发消息给 AI」被上游否决。
+**处理**：选 Flutter **只启动解析，零消息发出**（浮窗展示进度/结果，用户看完自己提问）；
+选普通应用才发路由指令（无本地解析环节）。
+

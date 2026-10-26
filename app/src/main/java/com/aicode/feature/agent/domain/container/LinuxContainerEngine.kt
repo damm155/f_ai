@@ -188,7 +188,10 @@ class LinuxContainerEngine @Inject constructor(
         projectPath: String?,
         timeoutMs: Long
     ): Flow<CommandEvent> = flow {
-        // 未就绪（rootfs 未解压或基础包未配置）时不自动初始化，直接提示用户去终端页完成初始化。
+        // 对齐 FBox：流式执行前幂等确保容器可用（首次自动解压 rootfs，已就绪零开销）。
+        // 初始化自身的解压进度已由 initProgress 流广播；这里失败不致命，继续尝试执行。
+        runCatching { ensureInstalled() }
+            .onFailure { emit(CommandEvent.Line("⚠ 容器初始化失败: ${it.message}")) }
         notReadyHint()?.let {
             emit(CommandEvent.Line(it))
             emit(CommandEvent.Exit(null))
@@ -284,7 +287,10 @@ class LinuxContainerEngine @Inject constructor(
         projectPath: String?,
         timeoutMs: Long
     ): String = withContext(Dispatchers.IO) {
-        // 未就绪时不自动初始化，直接返回引导文案，由用户去终端页完成初始化。
+        // 对齐 FBox：命令执行前幂等确保容器可用（首次会自动解压 rootfs + 释放逆向资产，
+        // 已就绪时零开销）。不再要求用户先去终端页——聊天页直接可用。
+        runCatching { ensureInstalled() }
+            .onFailure { FileLogger.w(TAG, "自动初始化失败（命令仍尝试执行）: ${it.message}") }
         notReadyHint()?.let { return@withContext it }
         execCaptured(command, projectPath, timeoutMs).output
     }
@@ -298,7 +304,9 @@ class LinuxContainerEngine @Inject constructor(
         projectPath: String?,
         timeoutMs: Long
     ): CommandResult = withContext(Dispatchers.IO) {
-        // 未就绪时不自动初始化，直接返回引导文案，由用户去终端页完成初始化。
+        // 同 runCommandSync：执行前幂等确保容器可用。
+        runCatching { ensureInstalled() }
+            .onFailure { FileLogger.w(TAG, "自动初始化失败（命令仍尝试执行）: ${it.message}") }
         notReadyHint()?.let { return@withContext CommandResult(it, null) }
         val r = execCaptured(command, projectPath, timeoutMs)
         CommandResult(r.output, r.exitCode, r.truncated)

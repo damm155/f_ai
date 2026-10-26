@@ -1889,28 +1889,28 @@ fun AIChatPanel(
                     onDismiss = { apkRoutePrompt = null },
                     onChoose = { kind ->
                         apkRoutePrompt = null
-                        val instruction = apkRouteInstructionText(selection.fileName, kind)
                         val chosen = listOf(selection.attachment)
-                        // 选「Flutter 应用」时立即触发 Blutter 本地解析（不消耗 AI 额度）：
-                        // 附件在 /root/uploads/，把它 cp 到 /root/apk/（工具链工作目录）再启动。
                         if (kind == com.aicode.feature.agent.domain.reverse.ApkTargetKind.FLUTTER) {
+                            // 对齐 FBox / MINIS-PORT 第 5 轮修正：Blutter 本地解析**零 token**，
+                            // 消息不由系统代发——解析完成后用户看到浮窗结果，再自己提问（用户主导）。
                             blutterController.start(selection.attachment.containerPath)
+                        } else {
+                            // 普通应用：无本地解析环节，直接发路由指令让 AI 走 apk-re 链。
+                            val instruction = apkRouteInstructionText(selection.fileName, kind)
+                            viewModel.enqueueAgentRequest(
+                                request = instruction,
+                                modelRequest = appendAttachmentsToRequest(context, instruction, chosen),
+                                currentFile = currentFile,
+                                selectedCode = selectedCode,
+                                projectRoot = projectRoot,
+                                inputImages = emptyList(),
+                                inputAttachments = chosen.toAgentAttachments()
+                            )
+                            followBottom = true
                         }
-                        // 同时入队一条带路由指令的请求：告知 AI 本地解析已启动、结果目录，
-                        // AI 会等浮窗完成后再接手（期间不重复跑 aicode-blutter）。
-                        viewModel.enqueueAgentRequest(
-                            request = instruction,
-                            modelRequest = appendAttachmentsToRequest(context, instruction, chosen),
-                            currentFile = currentFile,
-                            selectedCode = selectedCode,
-                            projectRoot = projectRoot,
-                            inputImages = emptyList(),
-                            inputAttachments = chosen.toAgentAttachments()
-                        )
                         pendingAttachments = pendingAttachments.filterNot {
                             it.containerPath == selection.attachment.containerPath
                         }
-                        followBottom = true
                     }
                 )
             }

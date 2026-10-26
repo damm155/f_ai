@@ -14,6 +14,9 @@ local.properties
 *.jks
 *.keystore
 keystore.properties
+# 例外：逆向能力随 APK 分发的 patch 证书（PKCS12，口令硬编码在 ApkSignTool），
+# 不是发布签名私钥；被 *.keystore 误伤会导致 apkSign 工具运行期取不到证书。
+!app/src/main/assets/reverse/keystore/patch.keystore
 
 # Debug / profiling
 *.hprof

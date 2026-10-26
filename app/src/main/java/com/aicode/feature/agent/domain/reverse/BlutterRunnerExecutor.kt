@@ -35,8 +35,8 @@ class BlutterRunnerExecutor @Inject constructor(
         const val MAGIC_1 = 0xF5.toByte()
         const val MAGIC_2 = 0xDC.toByte()
         const val MAGIC_3 = 0xDC.toByte()
-        /** 主进程等待 runner 的总超时（FBox 同值）。 */
-        const val WAIT_TIMEOUT_MS = 180_000L
+        /** 主进程等待 runner 的总超时。实测 17MB 的 APK 约 55s，大包留足余量。 */
+        const val WAIT_TIMEOUT_MS = 300_000L
         const val POLL_INTERVAL_MS = 500L
         /** 每隔多久探一次 :blutter 进程是否还活着（死了就不必等满超时）。 */
         const val ALIVE_PROBE_MS = 8_000L
@@ -135,6 +135,7 @@ class BlutterRunnerExecutor @Inject constructor(
         outDir: File,
         onLog: (String) -> Unit
     ): Int? {
+        val startedAt = System.currentTimeMillis()
         val hashes = extractSnapshotHashes(libappFile)
         if (hashes.isEmpty()) {
             onLog("⚠ 未在 libapp.so 提取到 Dart snapshot hash（可能已加固）")
@@ -176,31 +177,43 @@ class BlutterRunnerExecutor @Inject constructor(
             return null
         }
 
-        // 轮询结果（带超时与进程探活）
+        // 轮询结果（产物信号优先，进程探活仅兜底）
         val deadline = System.currentTimeMillis() + WAIT_TIMEOUT_MS
         var lastAliveProbe = System.currentTimeMillis()
-        var alive = true
         while (System.currentTimeMillis() < deadline) {
+            // ① 结果文件到 = 最终裁决（优先级最高）
             if (resultFile.isFile) {
                 val r = runCatching {
                     Json { ignoreUnknownKeys = true }.decodeFromString<RunResult>(resultFile.readText())
                 }.getOrNull()
                 if (r != null) {
-                    onLog(if (r.code == 0) "✓ Runner 执行完成（exit 0）" else "✗ Runner 退出码 ${r.code} ${r.error}")
-                    if (r.code != 0) blacklisted.add(runner.library)
+                    if (r.code == 0) {
+                        blacklisted.remove(runner.library)
+                        onLog("✓ Runner 执行完成（exit 0，耗时 ${(System.currentTimeMillis() - startedAt) / 1000}s）")
+                    } else {
+                        blacklisted.add(runner.library)
+                        onLog("✗ Runner 退出码 ${r.code} ${r.error}")
+                    }
                     resultFile.delete()
                     return r.code
                 }
             }
+
+            // ② 产物信号 = 活着且在干活（runner 不写 .analyzed_meta，用产物文件当心跳）
+            if (hasOutputSignal(outDir)) {
+                lastAliveProbe = System.currentTimeMillis()
+            }
+
+            // ③ 探活兜底：无结果文件且无任何产物信号时才允许判死
             if (System.currentTimeMillis() - lastAliveProbe > ALIVE_PROBE_MS) {
                 lastAliveProbe = System.currentTimeMillis()
-                alive = processAlive()
-                if (!alive && !resultFile.isFile) {
+                if (!processAlive() && !resultFile.isFile && !hasOutputSignal(outDir)) {
                     onLog("✗ :blutter 进程已死且无结果文件（native 崩溃，拉黑该 runner）")
                     blacklisted.add(runner.library)
                     return null
                 }
             }
+
             // 顺带把 runner 日志 tail 给浮窗
             tailRunnerLog(logFile, onLog)
             delay(POLL_INTERVAL_MS)
@@ -235,10 +248,19 @@ class BlutterRunnerExecutor @Inject constructor(
                 ?.any { p ->
                     runCatching {
                         val cmd = File(p, "cmdline").readBytes().toString(Charsets.UTF_8)
-                        cmd.contains("blutter")
+                        // 读失败/读到空串都属「无法证明死亡」，一律视为活着，不作为判死证据
+                        cmd.contains(":blutter") || cmd.contains("blutter")
                     }.getOrDefault(false)
                 } == true
         }.getOrDefault(true) // 探测失败时假定活着，宁可等超时也不误杀
+
+    /** 产物信号：outDir 里已出现任何 blutter 产物（pp.txt / asm/ / objs.txt）＝ runner 正常工作。 */
+    private fun hasOutputSignal(outDir: File): Boolean =
+        runCatching {
+            File(outDir, "pp.txt").let { it.isFile && it.length() > 0 } ||
+                (File(outDir, "asm").isDirectory && File(outDir, "asm").listFiles()?.isNotEmpty() == true) ||
+                File(outDir, "objs.txt").let { it.isFile && it.length() > 0 }
+        }.getOrDefault(false)
 
     /** 解 APK 抽 libapp.so / libflutter.so 到 [baseDir]/lib/arm64-v8a/。返回 (libappDir, libapp, libflutter)。 */
     fun extractFlutterLibs(apkFile: File, baseDir: File): Triple<File, File, File?>? {

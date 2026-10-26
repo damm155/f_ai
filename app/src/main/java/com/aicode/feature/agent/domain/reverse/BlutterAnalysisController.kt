@@ -138,6 +138,15 @@ class BlutterAnalysisController @Inject constructor(
                             )
                             return@launch
                         }
+                        // 慢通道前置刹车：runner 可能已产出部分/全部产物（如误判后放弃），有则直接认领
+                        if (hasProducts(outDir)) {
+                            _state.value = _state.value.copy(
+                                running = false,
+                                phase = BlutterPhase.DONE,
+                                resultSummary = "Runner 已产出结果（进程放弃前完成）：/root/out/$name/（pp.txt / asm/ / objs.txt）"
+                            )
+                            return@launch
+                        }
                         append("〔快通道未走通〕转容器编译路线（较慢，首次需联网拉 Dart SDK）")
                         _state.value = _state.value.copy(route = BlutterRoute.CONTAINER_BUILD)
                     }
@@ -257,6 +266,11 @@ class BlutterAnalysisController @Inject constructor(
         job = null
         _state.value = BlutterUiState.idle()
     }
+
+    /** 产物是否已存在（pp.txt 非空，或 asm/ 下已有文件）——转慢通道前的刹车判据。 */
+    private fun hasProducts(outDir: File): Boolean =
+        File(outDir, "pp.txt").let { it.isFile && it.length() > 0 } ||
+            (File(outDir, "asm").isDirectory && File(outDir, "asm").listFiles()?.isNotEmpty() == true)
 
     private fun phaseOf(line: String): BlutterPhase = when {
         line.contains("pip3 install", true) || line.contains("apt-get install", true) ||

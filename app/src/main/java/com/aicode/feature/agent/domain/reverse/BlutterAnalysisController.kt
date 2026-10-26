@@ -84,10 +84,14 @@ class BlutterAnalysisController @javax.inject.Inject constructor(
             try {
                 // 工具链工作目录约定：待分析 APK 在 /root/apk/（aicode-blutter/aicode-apk 均在此找）。
                 // 附件落在 /root/uploads/，先复制过去（幂等）。失败不中断——若源路径本就是 /root/apk/ 也无妨。
+                // 注意：容器路径可能是 ~/workspace/... 形式——shell 单引号内 ~ 不展开，
+                // 必须先展开为绝对路径（/root/workspace/...），否则 cp/blutter 全部找不到文件。
+                val apkAbs = apkContainerPath
+                    .replaceFirst("^~/?".toRegex(), "/root/")
+                    .let { if (!it.startsWith("/")) "/$it" else it }
                 runCatching {
                     commandEngine.runCommandSync(
-                        "mkdir -p /root/apk /root/out && " +
-                            "cp -f '${apkContainerPath.replace("'", "'\\''")}' /root/apk/ 2>/dev/null || true",
+                        "mkdir -p /root/apk /root/out && cp -f '${apkAbs.replace("'", "'\\''")}' /root/apk/ && ls -la /root/apk/${name}.apk",
                         projectPath = null,
                         timeoutMs = 15_000
                     )
@@ -146,7 +150,7 @@ class BlutterAnalysisController @javax.inject.Inject constructor(
                             timeoutMs = TIMEOUT_MS
                         )
                     else -> commandEngine.runCommandStream(
-                        "aicode-blutter '${apkContainerPath.replace("'", "'\\''")}'",
+                        "aicode-blutter '/root/apk/${name}.apk'",
                         projectPath = null,
                         timeoutMs = TIMEOUT_MS
                     )

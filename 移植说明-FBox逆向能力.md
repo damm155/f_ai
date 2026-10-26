@@ -474,3 +474,44 @@ rizin 对 blutter 编译分析无用（ELF 分析已由 so_tool + binutils 覆�
 - 浮窗阶段猜测收紧：只在日志出现 `pip3 install` / `apt-get install` / `Collecting` / `Downloading` 时才报「环境自愈」（真正在装包），而不是看到 setup.sh 字样就报。
 
 效果：真 Debian 镜像下，浮窗正常路径直接是「Blutter 解析中」；只有首次分析某 Dart 版本（要拉 SDK 编译）才会出现「编译 Dart 快照解析器」长阶段；环境真缺东西时才显示「环境自愈」。
+
+---
+
+## 十二、Blutter Runner 快通道接线（r6，对齐 MINIS-PORT 成功案例）
+
+### 12.1 资产（19 个 so，121 MB，全进 `_armJniLibs/arm64-v8a/`）
+
+| so | 作用 |
+|---|---|
+| `libfbox_blutter_2_14_0 … 3_12_0`（18 个） | 各 Dart 版本预编译 runner（JNI 静态注册） |
+| `libfbox_icu.so`（38 MB） | **全部 runner 的 DT_NEEDED 依赖**，缺一个 = 全军覆没（MINIS 坑②） |
+
+`keepDebugSymbols` 加了两组通配防 NDK strip 动符号。`runners.json`/`frida.template.js` 进 `assets/blutter/`。
+
+### 12.2 代码（4 个新文件 + 2 处改）
+
+| 文件 | 说明 |
+|---|---|
+| `com.zuimo.fbox.blutterrunner.BlutterJni`（Kotlin） | **包名类名原样保留**（JNI 静态注册符号 `Java_com_zuimo_fbox_blutterrunner_BlutterJni_*`）；`load(libraryName)` / `run(libappDir,outDir,libflutter,log)` / `lastError()` |
+| `com.zuimo.fbox.blutterrunner.BlutterRunnerService` | Intent 收 7 extra（runner/libapp_dir/out_dir/libflutter/log/result/hash，与 FBox smali @0x71b944 逐字对应）→ 子线程 load+run → 写 `{"code":N,"error":...}` JSON → stopSelf。**Manifest 声明 `android:process=":blutter"`**（一进程一 runner + 崩溃隔离，AXML 实证 FBox 同款） |
+| `BlutterRunnerExecutor` | ① `extractFlutterLibs`（ZipFile 抽 libapp/libflutter，**libapp_dir=所在目录** 坑③）② `extractSnapshotHashes`（魔数 f5f5dcdc + 偏移+20 取 32 字节 `[0-9a-g]`，8MB 扫描、64B 重叠，对齐 FBox）③ `selectRunner`（hash 交集 + supported + 会话级黑名单）④ `execute`（180s 轮询结果 JSON + 8s 进程探活 + tail runner.log 喂浮窗） |
+| `BlutterAnalysisController.start()` | **先快通道**（isAvailable → 抽 so → hash → 命中 → :blutter 执行）；失败/未命中 → 日志明示转慢通道（aicode-blutter）——与 FBox tryFastAnalyze 语义一致；浮窗 route 徽章显示「Runner So」或「容器编译」 |
+
+### 12.3 MINIS-PORT 六坑对照
+
+| 坑 | 处理 |
+|---|---|
+| ① JNI 包名类名不可改 | ✅ `com.zuimo.fbox.blutterrunner` 原样 |
+| ② icu 依赖 | ✅ 一起进 jniLibs |
+| ③ libapp_dir 语义 | ✅ 传 libapp.so 所在目录（注释+实现双强调） |
+| ④ w.js 硬编码路径 | ⚠ **待办**：runner 内嵌 `/data/data/com.zuimo.fbox/files/w.js`；AiCode 包名不是 fbox 时需**二进制等长替换**（NUL 补齐）。frida 动态插桩场景才用到 w.js——纯静态分析是否触发待真机验证；若触发，打包脚本里按包名 sed so |
+| ⑤ :blutter 子进程早退 | ✅ Manifest 已声明独立进程；AiCode 的 Application 无 abstract socket bind，无需早退（注释说明触发条件） |
+| ⑥ 环境失败≠不兼容 | ✅ 探活 + 结果 JSON 双通道区分；失败即拉黑，不烧全部 18 个 |
+
+### 12.4 流程
+
+```
+选 Flutter → 快通道：cp APK → 解 libapp/libflutter → hash 探测 → runners.json 匹配
+    ├─ 命中 → startService(:blutter) → JNI nativeRun → 轮询 result JSON → /root/out/<名>/
+    └─ 未命中/崩 → 拉黑 → 慢通道 aicode-blutter（容器编译）
+```

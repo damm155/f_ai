@@ -1,0 +1,150 @@
+{
+  "schemaVersion": 1,
+  "targetAbi": "arm64-v8a",
+  "runners": [
+    {
+      "library": "fbox_blutter_2_14_0",
+      "dartVersion": "2.14.0",
+      "snapshotHashes": [
+        "9cf77f4405212c45daf608e1cd646852"
+      ],
+      "supported": true
+    },
+    {
+      "library": "fbox_blutter_2_15_0",
+      "dartVersion": "2.15.0",
+      "snapshotHashes": [
+        "adf563436d12ba0d50ea5beb7f3be1bb"
+      ],
+      "supported": true
+    },
+    {
+      "library": "fbox_blutter_2_16_1",
+      "dartVersion": "2.16.1",
+      "snapshotHashes": [
+        "d56742caf7b3b3f4bd2df93a9bbb5503"
+      ],
+      "supported": true
+    },
+    {
+      "library": "fbox_blutter_2_17_0",
+      "dartVersion": "2.17.0",
+      "snapshotHashes": [
+        "1441d6b13b8623fa7fbf61433abebd31"
+      ],
+      "supported": true
+    },
+    {
+      "library": "fbox_blutter_2_18_0",
+      "dartVersion": "2.18.0",
+      "snapshotHashes": [
+        "b0e899ec5a90e4661501f0b69e9dd70f"
+      ],
+      "supported": true
+    },
+    {
+      "library": "fbox_blutter_2_19_0",
+      "dartVersion": "2.19.0",
+      "snapshotHashes": [
+        "501ef5cbd64ca70b6b42672346af6a8a"
+      ],
+      "supported": true
+    },
+    {
+      "library": "fbox_blutter_3_0_0",
+      "dartVersion": "3.0.0",
+      "snapshotHashes": [
+        "aa64af18e7d086041ac127cc4bc50c5e"
+      ],
+      "supported": true
+    },
+    {
+      "library": "fbox_blutter_3_1_0",
+      "dartVersion": "3.1.0",
+      "snapshotHashes": [
+        "7dbbeeb8ef7b91338640dca3927636de"
+      ],
+      "supported": true
+    },
+    {
+      "library": "fbox_blutter_3_2_0",
+      "dartVersion": "3.2.0",
+      "snapshotHashes": [
+        "f71c76320d35b65f1164dbaa6d95fe09"
+      ],
+      "supported": true
+    },
+    {
+      "library": "fbox_blutter_3_3_0",
+      "dartVersion": "3.3.0",
+      "snapshotHashes": [
+        "ee1eb666c76a5cb7746faf39d0b97547"
+      ],
+      "supported": true
+    },
+    {
+      "library": "fbox_blutter_3_4_0",
+      "dartVersion": "3.4.0",
+      "snapshotHashes": [
+        "d20a1be77c3d3c41b2a5accaee1ce549"
+      ],
+      "supported": true
+    },
+    {
+      "library": "fbox_blutter_3_5_0",
+      "dartVersion": "3.5.0",
+      "snapshotHashes": [
+        "80a49c7111088100a233b2ae788e1f48"
+      ],
+      "supported": true
+    },
+    {
+      "library": "fbox_blutter_3_7_0",
+      "dartVersion": "3.7.0",
+      "snapshotHashes": [
+        "d91c0e6f35f0eb2e44124e8f42aa44a7"
+      ],
+      "supported": true
+    },
+    {
+      "library": "fbox_blutter_3_8_0",
+      "dartVersion": "3.8.0",
+      "snapshotHashes": [
+        "830f4f59e7969c70b595182826435c19"
+      ],
+      "supported": true
+    },
+    {
+      "library": "fbox_blutter_3_9_0",
+      "dartVersion": "3.9.0",
+      "snapshotHashes": [
+        "97ff04a728735e6b6b098bdf983faaba"
+      ],
+      "supported": true
+    },
+    {
+      "library": "fbox_blutter_3_10_0",
+      "dartVersion": "3.10.0",
+      "snapshotHashes": [
+        "1ce86630892e2dca9a8543fdb8ed8e22"
+      ],
+      "supported": true
+    },
+    {
+      "library": "fbox_blutter_3_11_0",
+      "dartVersion": "3.11.0",
+      "snapshotHashes": [
+        "78da37fed6bf1489361a312568249f3f"
+      ],
+      "supported": true
+    },
+    {
+      "library": "fbox_blutter_3_12_0",
+      "dartVersion": "3.12.0",
+      "snapshotHashes": [
+        "41be3daaabd524b8aa7423bc24584957"
+      ],
+      "supported": true
+    }
+  ]
+}

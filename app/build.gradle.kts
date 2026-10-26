@@ -223,7 +223,11 @@ android {
                 "**/libproot-loader.so",
                 "**/libproot-loader32.so",
                 "**/libtalloc.so",
-                "**/libandroid-shmem.so"
+                "**/libandroid-shmem.so",
+                // Blutter Runner：预编译产物（JNI 静态注册符号 Java_com_zuimo_fbox_blutterrunner_*），
+                // 外部带入，NDK strip 不认识可能误处理，显式排除
+                "**/libfbox_blutter_*.so",
+                "**/libfbox_icu.so"
             )
         }
         resources {

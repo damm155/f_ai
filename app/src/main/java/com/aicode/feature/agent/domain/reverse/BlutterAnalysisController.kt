@@ -4,8 +4,11 @@ import com.aicode.core.util.FileLogger
 import com.aicode.feature.agent.domain.container.CommandEngine
 import com.aicode.feature.agent.domain.container.CommandEvent
 import com.aicode.feature.agent.domain.container.LinuxContainerEngine
+import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import dagger.hilt.android.qualifiers.ApplicationContext
+import java.io.File
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -15,25 +18,25 @@ import kotlinx.coroutines.launch
 /**
  * Blutter 本地分析控制器（对齐 FBox 的「Blutter 解析 Dart AOT（本地执行，不消耗 AI 额度）」）。
  *
- * 职责：
- * 1. 持有分析进度状态（[state]），供输入框上方的进度浮窗订阅渲染；
- * 2. 选定「Flutter 应用」线路后由 UI 调 [start]，在**容器内**跑 `aicode-blutter`，
- *    逐行回灌日志到浮窗（AI 全程不参与，零 token）；
- * 3. 完成后置 [BlutterUiState.completed]，由 UI 决定下一步（提示用户继续提问 / 自动发起）。
+ * 双路线（对齐 FBox tryFastAnalyze 语义）：
+ * 1. **快通道** [BlutterRunnerExecutor]：Dart snapshot hash → 命中内置 Runner So →
+ *    :blutter 独立进程 JNI 执行（秒级，不联网）；
+ * 2. **慢通道**：hash 未命中/失败 → 容器内 `aicode-blutter` 编译路线（首次需联网拉 Dart SDK）。
  *
- * 与 FBox 的差异：FBox 有「内置 Runner So 快通道」（BlutterJni + 独立 Service），
- * AiCode 暂只走容器编译路线（`aicode-blutter`），故 [BlutterUiState.route] 恒为
- * [BlutterRoute.CONTAINER_BUILD]；快通道可后续接入，状态结构已预留。
+ * 状态流 [state] 供输入框上方的进度浮窗订阅渲染（对齐 TodoDashboardBar 视觉）。
  */
 @dagger.hilt.android.lifecycle.HiltViewModel
 class BlutterAnalysisController @javax.inject.Inject constructor(
-    private val commandEngine: CommandEngine
+    private val commandEngine: CommandEngine,
+    private val runnerExecutor: BlutterRunnerExecutor,
+    @param:ApplicationContext private val context: Context
 ) : ViewModel() {
-    private companion object {
-        const val TAG = "BlutterAnalysis"
-        /** blutter 首次分析某 Dart 版本要现场拉 SDK + 编译，放宽到 40 分钟。 */
-        const val TIMEOUT_MS = 40L * 60 * 1000
-    }
+    /** App 侧直接可写的宿主 rootfs 根（容器内 / 的实体；容器内 /root 即其 root/ 子目录）。 */
+    private fun hostRootfs(): File = File(context.filesDir, "rootfs")
+
+    private suspend fun <T> withContextIO(block: () -> T): T =
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { block() }
+
 
     private val scope = viewModelScope
     private var job: Job? = null
@@ -66,6 +69,11 @@ class BlutterAnalysisController @javax.inject.Inject constructor(
         job = scope.launch {
             val lines = StringBuilder()
             var exitCode: Int? = null
+            fun append(line: String) {
+                if (line.isBlank()) return
+                lines.appendLine(line)
+                _state.value = _state.value.copy(log = lines.toString(), lastLine = line, phase = phaseOf(line))
+            }
             try {
                 // 工具链工作目录约定：待分析 APK 在 /root/apk/（aicode-blutter/aicode-apk 均在此找）。
                 // 附件落在 /root/uploads/，先复制过去（幂等）。失败不中断——若源路径本就是 /root/apk/ 也无妨。
@@ -77,6 +85,52 @@ class BlutterAnalysisController @javax.inject.Inject constructor(
                         timeoutMs = 15_000
                     )
                 }.onFailure { FileLogger.w(TAG, "预置 /root/apk 失败（继续）: ${it.message}") }
+
+                // ===== 快通道：Runner So（对齐 FBox tryFastAnalyze；秒级，不联网）=====
+                if (runnerExecutor.isAvailable()) {
+                    _state.value = _state.value.copy(route = BlutterRoute.RUNNER_SO)
+                    append("〔快通道〕解 APK 抽取 libapp.so / libflutter.so…")
+                    // APK 落在宿主 rootfs 的 root/apk/（容器内 /root/apk/）——App 侧 File 直接可读
+                    val hostApk = File(hostRootfs(), "root/apk/$name.apk")
+                    val extracted = withContextIO {
+                        runnerExecutor.extractFlutterLibs(hostApk, File(hostRootfs(), "root/out/$name"))
+                    }
+                    if (extracted == null) {
+                        append("⚠ Flutter so 提取失败，转容器编译路线")
+                    } else {
+                        val (libappDir, libapp, libflutter) = extracted
+                        append("✓ libapp.so ${"%.1f".format(libapp.length() / 1048576f)}MB 已就位")
+                        val outDir = File(hostRootfs(), "root/out/$name")
+                        outDir.mkdirs()
+                        val code = runnerExecutor.execute(
+                            apkName = name,
+                            libappDir = libappDir,
+                            libappFile = libapp,
+                            libflutterFile = libflutter,
+                            outDir = outDir,
+                            onLog = ::append
+                        )
+                        if (code != null) {
+                            val ok = code == 0
+                            _state.value = _state.value.copy(
+                                running = false,
+                                phase = if (ok) BlutterPhase.DONE else BlutterPhase.FAILED,
+                                exitCode = code,
+                                resultSummary = if (ok)
+                                    "Runner 分析完成：/root/out/$name/（pp.txt / asm/ / objs.txt）"
+                                else
+                                    "Runner 退出码 $code（已记录，可回退容器编译路线）"
+                            )
+                            return@launch
+                        }
+                        append("〔快通道未走通〕转容器编译路线（较慢，首次需联网拉 Dart SDK）")
+                        _state.value = _state.value.copy(route = BlutterRoute.CONTAINER_BUILD)
+                    }
+                } else {
+                    _state.value = _state.value.copy(route = BlutterRoute.CONTAINER_BUILD)
+                }
+
+                // ===== 慢通道：容器编译路线（aicode-blutter）=====
                 val flow = when (commandEngine) {
                     is LinuxContainerEngine ->
                         (commandEngine as LinuxContainerEngine).runCommandStream(

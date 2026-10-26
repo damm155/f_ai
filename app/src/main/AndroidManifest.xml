@@ -68,6 +68,12 @@
         </provider>
 
         <service
+            android:name="com.zuimo.fbox.blutterrunner.BlutterRunnerService"
+            android:exported="false"
+            android:process=":blutter" />
+        <!-- Blutter Runner 独立进程（:blutter）：一进程一 runner（JNI 静态注册符号唯一）+ native 崩溃隔离。 -->
+
+        <service
             android:name=".feature.terminal.domain.TerminalKeepaliveService"
             android:enabled="true"
             android:exported="false"

@@ -27,6 +27,8 @@ class BlutterRunnerService : Service() {
 
     private companion object {
         const val TAG = "BlutterRunner"
+        /** 心跳间隔：主进程据此判断 runner 是否活着（不依赖 /proc）。 */
+        const val HEARTBEAT_MS = 2_000L
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -39,12 +41,30 @@ class BlutterRunnerService : Service() {
         val logPath = intent?.getStringExtra("log") ?: ""
         val resultPath = intent?.getStringExtra("result") ?: ""
         val hash = intent?.getStringExtra("hash") ?: ""
+        val heartbeatPath = intent?.getStringExtra("heartbeat") ?: ""
 
         if (runner.isBlank() || libappDir.isBlank()) {
             FileLogger.e(TAG, "runner/libapp_dir 为空，放弃执行")
             writeResult(resultPath, -1, "runner or libapp_dir blank")
             stopSelf()
             return START_NOT_STICKY
+        }
+
+        // 心跳：nativeRun 是阻塞调用，worker 线程无法兼任心跳，故单独起一个守护线程。
+        // 主进程靠它判断 runner 是否还在跑——Android 12 上跨进程读 /proc/<pid>/cmdline 常被裁掉，
+        // 只能读到空串，靠它探活会把活着的 runner 误判为崩溃。
+        val workerAlive = java.util.concurrent.atomic.AtomicBoolean(true)
+        if (heartbeatPath.isNotBlank()) {
+            Thread {
+                val hb = File(heartbeatPath)
+                while (workerAlive.get()) {
+                    runCatching {
+                        hb.parentFile?.mkdirs()
+                        hb.writeText(System.currentTimeMillis().toString())
+                    }
+                    runCatching { Thread.sleep(HEARTBEAT_MS) }
+                }
+            }.apply { isDaemon = true }.start()
         }
 
         Thread {
@@ -67,6 +87,7 @@ class BlutterRunnerService : Service() {
                 err = t.message ?: t.toString()
                 FileLogger.e(TAG, "runner 执行异常", t)
             }
+            workerAlive.set(false)
             writeResult(resultPath, code, err)
             runCatching { File(logPath).appendText("\n[exit code: $code]\n") }
             stopSelf()

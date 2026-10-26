@@ -158,8 +158,10 @@ class BlutterRunnerExecutor @Inject constructor(
         onLog("✓ 命中内置 Runner：${runner.library}（Dart ${runner.dartVersion}），启动 :blutter 进程…")
 
         val resultFile = File(context.cacheDir, "blutter_run_result_${System.currentTimeMillis()}.json")
+        val heartbeatFile = File(context.cacheDir, "blutter_run_heartbeat.json")
         val logFile = File(outDir, "runner.log")
         resultFile.delete()
+        heartbeatFile.delete()
 
         val intent = Intent(context, BlutterRunnerService::class.java).apply {
             putExtra("runner", runner.library)
@@ -168,6 +170,7 @@ class BlutterRunnerExecutor @Inject constructor(
             putExtra("libflutter", libflutterFile?.absolutePath ?: "")
             putExtra("log", logFile.absolutePath)
             putExtra("result", resultFile.absolutePath)
+            putExtra("heartbeat", heartbeatFile.absolutePath)
             putExtra("hash", hashes.first())
         }
         val started = runCatching { context.startService(intent) }.isSuccess
@@ -177,9 +180,8 @@ class BlutterRunnerExecutor @Inject constructor(
             return null
         }
 
-        // 轮询结果（产物信号优先，进程探活仅兜底）
+        // 轮询结果（结果文件 → 心跳 → 产物信号，三者任一可判定状态）
         val deadline = System.currentTimeMillis() + WAIT_TIMEOUT_MS
-        var lastAliveProbe = System.currentTimeMillis()
         while (System.currentTimeMillis() < deadline) {
             // ① 结果文件到 = 最终裁决（优先级最高）
             if (resultFile.isFile) {
@@ -199,19 +201,13 @@ class BlutterRunnerExecutor @Inject constructor(
                 }
             }
 
-            // ② 产物信号 = 活着且在干活（runner 不写 .analyzed_meta，用产物文件当心跳）
-            if (hasOutputSignal(outDir)) {
-                lastAliveProbe = System.currentTimeMillis()
-            }
-
-            // ③ 探活兜底：无结果文件且无任何产物信号时才允许判死
-            if (System.currentTimeMillis() - lastAliveProbe > ALIVE_PROBE_MS) {
-                lastAliveProbe = System.currentTimeMillis()
-                if (!processAlive() && !resultFile.isFile && !hasOutputSignal(outDir)) {
-                    onLog("✗ :blutter 进程已死且无结果文件（native 崩溃，拉黑该 runner）")
-                    blacklisted.add(runner.library)
-                    return null
-                }
+            // ② 产物信号（runner 不写 .analyzed_meta，用产物文件当心跳）
+            // ③ 判定死亡：无结果文件、无心跳、也无产物时才能拉黑放弃
+            // 这里不再依赖 /proc（Android 12 上跨进程 cmdline 常读到空串，会把活着的 runner 误判为崩溃）。
+            if (!resultFile.isFile && !heartbeatFresh(heartbeatFile) && !hasOutputSignal(outDir)) {
+                onLog("✗ :blutter 进程已无心跳且无结果文件（native 崩溃，拉黑该 runner）")
+                blacklisted.add(runner.library)
+                return null
             }
 
             // 顺带把 runner 日志 tail 给浮窗
@@ -242,17 +238,15 @@ class BlutterRunnerExecutor @Inject constructor(
         }.onFailure { lastLogLen = 0 }
     }
 
-    private fun processAlive(): Boolean =
-        runCatching {
-            File("/proc").listFiles { f -> f.name.all { it.isDigit() } }
-                ?.any { p ->
-                    runCatching {
-                        val cmd = File(p, "cmdline").readBytes().toString(Charsets.UTF_8)
-                        // 读失败/读到空串都属「无法证明死亡」，一律视为活着，不作为判死证据
-                        cmd.contains(":blutter") || cmd.contains("blutter")
-                    }.getOrDefault(false)
-                } == true
-        }.getOrDefault(true) // 探测失败时假定活着，宁可等超时也不误杀
+    /**
+     * 心跳是否新鲜。Service 侧每 2s 改写一次心跳文件，故允许 ALIVE_PROBE_MS 的宽限；
+     * 文件不存在（旧 Service/异常）视为「无法证明死亡」，也返回 true，宁可等超时。
+     */
+    private fun heartbeatFresh(heartbeatFile: File): Boolean {
+        if (!heartbeatFile.isFile) return true
+        val ts = runCatching { heartbeatFile.readText().trim().toLong() }.getOrNull() ?: return true
+        return System.currentTimeMillis() - ts < ALIVE_PROBE_MS
+    }
 
     /** 产物信号：outDir 里已出现任何 blutter 产物（pp.txt / asm/ / objs.txt）＝ runner 正常工作。 */
     private fun hasOutputSignal(outDir: File): Boolean =

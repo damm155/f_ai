@@ -129,3 +129,10 @@
 # MacroInfo.macro 保持 null，渲染时 Method.invoke NPE——release 包上所有带 \begin / 自定义宏的
 # 公式空白，debug 不混淆故正常。整包保留类名与方法名，避免再被 interface 去虚化等优化破坏。
 -keep class org.scilab.forge.jlatexmath.** { *; }
+
+
+# ---------------------------------------------------------------- apksig
+# APK 签名库（com.android.tools.build:apksig）。其 ASN.1 编解码器通过反射读取
+# @Asn1Field 等字段注解，R8 混淆/裁剪字段名后 v1 签名会失败，故整包保留。
+-keep class com.android.apksig.** { *; }
+-dontwarn com.android.apksig.**

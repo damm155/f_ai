@@ -10,7 +10,18 @@
 #   aicode-so strings <so> [正则]          ← so_strings
 #   aicode-so cfg     <so> <地址或符号>     ← 控制流图
 #
+#   patch_so（完整版，asm/hex 双模式 + 分支重定位 + .bak 备份）：
+#     python3 /root/flutter-re/patch_so.py <so> <addr> "asm 指令; 分号续"   ← patch_so（asm 模式）
+#     python3 /root/flutter-re/patch_so.py <so> <addr> --bytes "20 00 80 52" ← patch_so（hex 模式）
+#     可加 --out <路径> 另存；同路径写入自动留 <so>.bak 备份
+#   aicode-so patch <so> <addr:hex>[:addr:hex...] [--dry]  ← 轻量 hex 补丁（so_tool 内置；.orig 备份）
+#   aicode-so patch <so> --restore                          ← 从 .orig 还原
+#
 # 反汇编示例：aicode-so disasm libapp.so 0x1a2b3c 64
+# 打补丁示例（asm，推荐）：python3 /root/flutter-re/patch_so.py libapp.so 0x1a2b3c "mov w0, #1; ret"
+# 打补丁示例（hex）：     aicode-so patch libapp.so 0x1a2b3c:20008052c0035fd6
+# 分支示例：             python3 /root/flutter-re/patch_so.py libapp.so 0x1a2b3c "b #0x1a2c0"
+#   （分支目标自动按 PC 重定位；arm64 指令须 4 字节对齐）
 # 移植自 FBox（资产由 ReverseAssets 按需解压到 /root/so-tool）。
 # 依赖自检：so_tool 需要 python3 + capstone（Debian 镜像已预装 capstone 5.0.7）
 command -v python3 >/dev/null 2>&1 || {

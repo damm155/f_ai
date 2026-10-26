@@ -346,6 +346,10 @@ dependencies {
     // xz 解压支持：commons-compress 的 XZCompressorInputStream 依赖此库（解压用户导入的 .tar.xz 镜像）
     implementation("org.tukaani:xz:1.10")
 
+    // APK 签名：Google 官方 apksig（容器内无 JDK，故签名在 App 侧做）。
+    // 与 FBox 同路线——其 LinuxViewModel.signApkWithApksig 也是调 apksig。
+    implementation("com.android.tools.build:apksig:8.7.3")
+
     // Termux 开源终端组件：terminal-emulator 负责 VT100/ANSI 解析与 PTY（自带 native .so），
     // terminal-view 是渲染用的 Android View。经 JitPack 分发（com.github.<user>.<repo> 坐标形式），
     // 避免自行实现终端模拟器。

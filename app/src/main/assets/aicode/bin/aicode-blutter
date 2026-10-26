@@ -7,14 +7,136 @@
 #   ③ 兜底：用 aicode-so 直接静态分析 libapp.so（无需 blutter 还原函数名也能改字节）。
 #
 # 用法：
-#   aicode-blutter <apk路径> [输出目录]
-#   输出（默认 /root/out/<apk 名>/）：pp.txt 常量池/类名、asm/ Dart 反汇编、objs.txt 对象结构
+#   aicode-blutter <apk路径> [输出目录]        完整分析（慢：首次某 Dart 版本要联网拉 Dart SDK）
+#   aicode-blutter --scan <apk路径>            秒级特征侦察（不解压、不编译：查 libapp.so/libflutter.so/
+#                                              flutter_assets/dex 数量 + arm64 缺失提醒 + ELF 魔数校验）
+#                                              对应 FBox fast_scan_apk，分析前必做
+#   aicode-blutter --status [输出目录]          查看分析进度/是否已有结果（对应 FBox analysis_status）
+#   aicode-blutter --search <目录|out> <正则>   全文搜特征串/函数名（pp.txt + asm/），对应 FBox search_flutter
+#   aicode-blutter --read <文件> [行数]         精读结果文件片段（默认 4000 字符上限），对应 read_flutter_result
+#
+# 输出（默认 /root/out/<apk 名>/）：pp.txt 常量池/类名、asm/ Dart 反汇编、objs.txt 对象结构
 #
 # 兼容性提示：容器内这套 blutter 源码工具链对新版 Dart 适配有限（双→单快照、Closure 布局等），
-# 失败时日志会给出指引，请退到路线 ③。
+# 失败时日志会给出指引，请退到路线 ③（aicode-so 直接分析字节）。
 set -u
 
-[ $# -ge 1 ] || { echo "用法: aicode-blutter <apk路径> [输出目录]" >&2; exit 2; }
+MODE="run"
+case "${1:-}" in
+  --scan)   MODE="scan";   shift ;;
+  --status) MODE="status"; shift ;;
+  --search) MODE="search"; shift ;;
+  --read)   MODE="read";   shift ;;
+esac
+
+# ---------- --read：精读结果文件 ----------
+if [ "$MODE" = "read" ]; then
+  [ $# -ge 1 ] || { echo "用法: aicode-blutter --read <结果文件> [最大字符数=4000]" >&2; exit 2; }
+  python3 - "$@" <<'PYEOF'
+import sys
+p=sys.argv[1]; limit=int(sys.argv[2]) if len(sys.argv)>2 else 4000
+try:
+    data=open(p,'rb').read()
+except OSError as e:
+    print("✗ 读不了: %s" % e); sys.exit(1)
+text=data.decode('utf-8','replace')
+print("✓ %s（共 %d 字符，显示前 %d）:" % (p, len(text), min(limit,len(text))))
+print(text[:limit])
+if len(text)>limit:
+    print("
+…（截断，共 %d 字符。用 sed -n '起,止p' %s 精读后续行区间）" % (len(text), p))
+PYEOF
+  exit $?
+fi
+
+# ---------- --search：全文检索 ----------
+if [ "$MODE" = "search" ]; then
+  [ $# -ge 2 ] || { echo "用法: aicode-blutter --search <结果目录|/root/out> <正则> [最多命中=30]" >&2; exit 2; }
+  python3 - "$@" <<'PYEOF'
+import sys, os, re
+root=sys.argv[1]; pat=sys.argv[2]; cap=int(sys.argv[3]) if len(sys.argv)>3 else 30
+if not os.path.isdir(root):
+    print("✗ 目录不存在: %s（/root/out 下的分析结果目录）" % root); sys.exit(1)
+rx=re.compile(pat, re.I)
+files=[]
+for dp,_,fns in os.walk(root):
+    for fn in fns:
+        if fn.endswith(('.txt','.md','.S','.js','.json')): files.append(os.path.join(dp,fn))
+hits=0
+for f in sorted(files):
+    try: lines=open(f,encoding='utf-8',errors='replace').read().splitlines()
+    except OSError: continue
+    for i,l in enumerate(lines,1):
+        if rx.search(l):
+            print("%s:%d: %s" % (f,i,l.strip()[:200]))
+            hits+=1
+            if hits>=cap:
+                print("…（已达上限 %d，可用更精确的正则）" % cap); sys.exit(0)
+print("共 %d 处命中（%d 个文件被扫）" % (hits,len(files)))
+PYEOF
+  exit $?
+fi
+
+# ---------- --status：进度 ----------
+if [ "$MODE" = "status" ]; then
+  OUT2="${1:-}"
+  if [ -z "$OUT2" ]; then
+    echo "=== /root/out 下的分析结果 ==="
+    ls -la /root/out 2>/dev/null || echo "（/root/out 尚不存在——还没跑过任何分析）"
+    echo
+    echo "提示：aicode-blutter --status <目录> 看某个结果的详情"
+    exit 0
+  fi
+  if [ ! -d "$OUT2" ]; then echo "✗ 目录不存在: $OUT2"; exit 1; fi
+  echo "=== $OUT2 ==="
+  for f in README.md pp.txt objs.txt frida.js; do
+    [ -f "$OUT2/$f" ] && printf "  %-12s %s 字节
+" "$f" "$(stat -c%s "$OUT2/$f")"
+  done
+  [ -d "$OUT2/asm" ] && echo "  asm/         $(ls "$OUT2/asm" | wc -l) 个文件"
+  [ -f "$OUT2/.analyzed_meta" ] && echo "  .analyzed_meta 存在（已完成的缓存标记）"
+  exit 0
+fi
+
+# ---------- --scan：秒级侦察 ----------
+if [ "$MODE" = "scan" ]; then
+  [ $# -ge 1 ] || { echo "用法: aicode-blutter --scan <apk路径>" >&2; exit 2; }
+  exec python3 - "$1" <<'PYEOF'
+import sys, zipfile, os
+apk=sys.argv[1]
+if not os.path.isfile(apk):
+    print("✗ APK 不存在: %s" % apk); sys.exit(1)
+try:
+    z=zipfile.ZipFile(apk)
+except Exception as e:
+    print("✗ 不是合法 ZIP/APK: %s" % e); sys.exit(1)
+names=z.namelist()
+has=lambda pred: [n for n in names if pred(n)]
+fa   = has(lambda n: n.startswith("assets/flutter_assets/"))
+lf   = has(lambda n: n=="libflutter.so" or n.endswith("/libflutter.so"))
+la   = has(lambda n: n=="libapp.so" or n.endswith("/libapp.so"))
+dexes= has(lambda n: n.endswith(".dex"))
+abis = sorted(set(n.split("/")[1] for n in has(lambda n: n.startswith("lib/") and n.count("/")>=2)))
+print("✓ 快速扫描 %s（%.1f MB，%d 条目）" % (os.path.basename(apk), os.path.getsize(apk)/1048576, len(names)))
+print("  Flutter 特征: flutter_assets=%s libflutter.so=%s libapp.so=%s → %s" % (
+    len(fa), len(lf), len(la),
+    "Flutter 应用" if (fa and lf and la) else "非 Flutter（走 aicode-apk DEX 链）"))
+print("  dex: %d 个   abi: %s" % (len(dexes), ",".join(abis) or "无"))
+if (fa or lf or la) and not la:
+    print("  ⚠ 有 flutter_assets/libflutter 但缺 libapp.so（32 位 Flutter 包？blutter 需 arm64 快照）")
+if la:
+    import struct
+    with z.open(la[0]) as f: magic=f.read(4)
+    print("  libapp.so: %s（%s）→ %s" % (la[0], "ELF ✓" if magic==b"ELF" else "非 ELF ✗（加固/加密），静态分析无法进行",
+                                          "%.1f MB" % (z.getinfo(la[0]).file_size/1048576)))
+for n in (fa[:1]+lf[:1]+la[:1]):
+    print("    例: %s" % n)
+PYEOF
+  exit $?
+fi
+
+# ---------- 默认：完整分析 ----------
+[ $# -ge 1 ] || { echo "用法: aicode-blutter <apk路径> [输出目录]（或 --scan/--status/--search/--read）" >&2; exit 2; }
 APK="$1"
 NAME=$(basename "$APK" | sed 's/\.apk$//')
 OUT="${2:-/root/out/$NAME}"

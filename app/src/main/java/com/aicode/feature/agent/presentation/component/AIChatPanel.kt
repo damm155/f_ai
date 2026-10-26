@@ -75,6 +75,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.aicode.feature.agent.domain.reverse.ApkTypeDetector
 import com.aicode.R
 import com.aicode.core.theme.Spacing
 import com.aicode.core.ui.ImageViewerHost
@@ -103,7 +104,9 @@ import java.io.File
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 
 /**
@@ -691,6 +694,9 @@ fun AIChatPanel(
         if (inputText == "/") viewModel.refreshSlashCommands()
     }
     var pendingAttachments by remember { mutableStateOf<List<PendingUploadAttachment>>(emptyList()) }
+
+    /** APK 类型判定结果；非 null 时展示线路选择弹窗（对齐 FBox 的导入即判定）。 */
+    var apkRoutePrompt by remember { mutableStateOf(null as ApkRouteSelection?) }
     var uploadingCount by remember { mutableStateOf(0) }
     var messageForMenu by remember { mutableStateOf<AgentUIMessage?>(null) }
     var editingMessage by remember { mutableStateOf<AgentUIMessage?>(null) }
@@ -949,8 +955,16 @@ fun AIChatPanel(
                     runCatching {
                         copyUriToWorkspace(context, uri, viewModel.fileAccess, includeImageData = images)
                     }.onSuccess { uploaded ->
-                        pendingAttachments = pendingAttachments + uploaded.toPendingAttachment()
+                        val justUploaded = uploaded.toPendingAttachment()
+                        pendingAttachments = pendingAttachments + justUploaded
                         successCount += 1
+                        // 上传的是 APK 时自动判定类型并弹窗引导线路（判定只读 ZIP 目录项，毫秒级）
+                        if (uploaded.fileName.lowercase().endsWith(".apk")) {
+                            val kind = withContext(Dispatchers.IO) {
+                                ApkTypeDetector.detect(File(uploaded.localPath))
+                            }
+                            apkRoutePrompt = ApkRouteSelection(uploaded.fileName, justUploaded, kind)
+                        }
                     }.onFailure { error ->
                         failures += (error.message ?: uploadFallbackError(context))
                     }
@@ -1854,6 +1868,33 @@ fun AIChatPanel(
                     onConfirm = { newContent ->
                         viewModel.updateMessageContent(message.id, newContent)
                         editingMessage = null
+                    }
+                )
+            }
+
+            apkRoutePrompt?.let { selection ->
+                ApkRouteDialog(
+                    fileName = selection.fileName,
+                    detected = selection.kind,
+                    onDismiss = { apkRoutePrompt = null },
+                    onChoose = { kind ->
+                        apkRoutePrompt = null
+                        val instruction = apkRouteInstructionText(selection.fileName, kind)
+                        val chosen = listOf(selection.attachment)
+                        // 直接入队一条带路由指令的请求，用户无需再复述「这是 Flutter 还是原生」
+                        viewModel.enqueueAgentRequest(
+                            request = instruction,
+                            modelRequest = appendAttachmentsToRequest(context, instruction, chosen),
+                            currentFile = currentFile,
+                            selectedCode = selectedCode,
+                            projectRoot = projectRoot,
+                            inputImages = emptyList(),
+                            inputAttachments = chosen.toAgentAttachments()
+                        )
+                        pendingAttachments = pendingAttachments.filterNot {
+                            it.containerPath == selection.attachment.containerPath
+                        }
+                        followBottom = true
                     }
                 )
             }

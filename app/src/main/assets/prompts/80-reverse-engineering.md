@@ -15,7 +15,10 @@
 | DEX 打补丁 | `aicode-apk dex-return`（强返）/ `dex-smali`（重写）/ `dex-string-edit` | apk_dex_patch |
 | 重打包 | `aicode-apk rebuild <apk> <out.apk>` | repack_apk |
 | SO 摘要/符号/JNI/反汇编/字符串 | `aicode-so info\|symbols\|jni\|disasm\|strings\|cfg` | so_info / so_symbols / so_jni / so_disasm / so_strings |
+| **SO 字节补丁（完整版：asm/hex + 分支重定位）** | `python3 /root/flutter-re/patch_so.py <so> <addr> "mov w0,#1; ret"`（asm）或 `--bytes "20 00 80 52"`（hex），`--out` 另存、自动 `.bak` 备份 | patch_so |
+| SO 补丁（轻量 hex + 整文件回滚） | `aicode-so patch <so> <addr:hex> [--dry]` / `patch <so> --restore`（.orig 备份） | （patch_so 简化版 / rollback） |
 | Flutter Dart AOT 分析（容器编译路线） | `aicode-blutter <apk> [out]` | start_analysis |
+| **APK 签名（v1+v2，产出可安装包）** | **`apkSign` 工具**（App 侧，非 shell 命令） | apk_sign |
 
 每个命令都支持 `--help`，**先用 `--help` 或上述用法确认参数，不要臆造参数**。
 
@@ -47,6 +50,15 @@
    严禁重跑 `aicode-blutter`（重跑几分钟起）。`ls /root/out` 先查。
 6. **明确结论分级**：向用户汇报时区分「事实（命令输出直接可见）」「推断（多证据推理）」「猜测（未验证）」，
    禁止把猜测当结论。
-7. **改动前先备份**：`aicode-apk rebuild` 产出的是**未签名** APK；要交付可安装包需另行签名，
-   并在交付时说明这一点。
-8. **别把工作区当垃圾场**：临时脚本、中间产物放 `/root/work/`；不要在 `/root` 根下或工作区里乱写文件。
+7. **交付可安装包的标准链路**（缺签名用户装不上，务必走完）：
+   ```
+   aicode-apk rebuild <改过的.apk> <out.apk>   # reapk 重打包，已 zipalign，但【未签名】
+   apkSign apk=<out.apk>                        # 签名 + 自校验（内置 keystore）
+   sendFile paths=[<签名产物>]                  # 展示给用户，点开即安装
+   ```
+   `apkSign` 的输出里带 `hostPath` / `apk`（容器路径）两种形式，`sendFile` 用容器路径即可。
+   若设备已装同包名但签名不同的应用，需提示用户先卸载。）
+
+8. **改 dex/manifest 之前先备份原包**：`aicode-apk` 的 patch 子命令会原地改写 APK，
+   建议先 `cp` 一份到 `/root/work/`。所有补丁/签名产物都放 `/root/out/` 或 `/root/work/`。
+9. **别把工作区当垃圾场**：临时脚本、中间产物放 `/root/work/`；不要在 `/root` 根下或工作区里乱写文件。

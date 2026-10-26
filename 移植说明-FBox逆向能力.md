@@ -287,3 +287,108 @@ x86 侧没有 Debian 镜像，因此：
 若要进一步精简，可下掉 `container` flavor 维度只留一个 flavor。
 
 占位版包体积随之从 23 MB 降到 **19 MB**。
+
+---
+
+## 十、补齐缺口（本批新增，对应 FBox 的 App 侧工具层）
+
+### 10.1 完整缺口核对结论
+
+FBox 共 **38 个 AI 工具**，逐项对照 AiCode 后，容器工具链层**零缺失**（`aicode-apk` 13 子命令、
+`aicode-so` 6 子命令 = FBox 全量子命令集，且用的是同一份 `apk_tool.py`/`so_tool.py`）。
+缺的全在 **App 侧工具/UI 层**：
+
+| # | FBox 有 | AiCode 原状 | 本批处理 |
+|---|---|---|---|
+| 1 | `apk_sign` / `repack_apk`（含签名导出） | ❌ 无签名能力 | ✅ **已补（10.2）** |
+| 2 | 类型判定 + 弹窗推荐/框选 | ❌ 无 | ✅ **已补（10.3）** |
+| 3 | `patch_so` | ❌ `aicode-so` 只读 | ⏳ 未做 |
+| 4 | Blutter Runner 快通道（18 so + 服务） | ❌ 无 | ⏳ 未做 |
+| 5 | 补丁柜 5 件套 | ❌ 无（`CheckpointManager` 是会话文件检查点，非补丁柜） | ⏳ 未做 |
+| 6 | `fast_scan_apk` / `analysis_status` / `search_flutter` / `read_flutter_result` | ❌ 无 | ⏳ 建议并入 wrapper（`--scan`/`--status`）+ 提示词引导用 grep/readFile |
+| 7 | `reflutter` 链 | ⚠️ 资产已放、未接线 | ⏳ 未做 |
+| 8 | `query_experience` / `save_experience` | ⚠️ `/root/knowledge` 已持久绑定、未接线 | ⏳ 未做 |
+| 9 | `ocr_image` | ⚠️ 仅 `viewImage`（给模型看图，非离线取字） | ⏳ 未做 |
+| 10 | `create_task_plan`/`update`/`finish` | ✅ `todo` 等价 | — |
+| 11 | `memory_write`/`get`、`file_*`、`run_terminal_command`、`list_skills`/`read_skill`、`so_*`、`apk_*` | ✅ 均已有等价 | — |
+
+**AiCode 反而更强**：`websearch`/`webfetch`/`browser`（FBox 无联网）、`task` 子代理、`manageMcp`、`Shizuku`。
+
+### 10.2 APK 签名（新增）
+
+**做法与 FBox 完全同构**：FBox 自己就内嵌 Google 官方 apksig（`classes2.dex` 里
+`com.android.apksig.ApkSigner` / `V1|V2|V3SchemeSigner` / `ApkVerifier` 齐全），签名在 **App 侧**做
+（容器无 JDK）。核到其 smali `LinuxViewModel.signApkWithApksig(File, File)`，流程逐条为：
+
+```
+KeyStore.getInstance("PKCS12") → assets.open("patch.keystore") → ks.load(is, "linuxbox".toCharArray())
+alias = ks.aliases().nextElement() → getKey(alias, pw) / getCertificate(alias)
+ApkSigner.SignerConfig.Builder(alias, key, listOf(cert)).build()
+ApkSigner.Builder(listOf(cfg)).setInputApk(in).setOutputApk(out)
+    .setV1SigningEnabled(true).setV2SigningEnabled(true).build().sign()
+```
+
+据此在 AiCode 落地：
+
+| 项 | 内容 |
+|---|---|
+| 依赖 | `com.android.tools.build:apksig:8.7.3`（腾讯 mirror 有；字节码 major=52/Java8，无需脱糖） |
+| 混淆 | `proguard-rules.pro` 加 `-keep class com.android.apksig.** { *; }`（其 ASN.1 编解码用反射读字段注解，R8 后 v1 签名会失败） |
+| 工具 | `feature/agent/domain/tool/reverse/ApkSignTool.kt`，名 `apkSign`，参数 `apk`（容器路径）/`out`（可选） |
+| 注册 | `AgentModule.provideToolRegistry` 加参 + `register("apkSign", apkSignTool)` |
+| 密钥 | 复用 FBox 的 `assets/reverse/keystore/patch.keystore`（**口令 `linuxbox`，别名 `linuxbox`，证书 CN=LinuxBox Patch，有效期至 2054**） |
+
+**实测验证（容器内装 JDK 21 + apksig 8.7.3 真跑）**：
+造最小真实 APK（Manifest + resources.arsc + classes.dex + lib/*.so）→ `aicode-apk rebuild` 出未签名包
+→ 用与 Kotlin 逐行对应的 Java 程序签名 → `ApkVerifier` 结果：
+`alias=linuxbox / subject=CN=LinuxBox Patch / v2=true / v3=true / 全部通过=true`。
+产物含 `META-INF/MANIFEST.MF`、`LINUXBOX.SF`、`LINUXBOX.RSA`（v1 已写入；apksig 验证器在
+minSdk≥24 且 v2 通过时会跳过 v1 校验，故 `isVerifiedUsingV1Scheme()=false` 属正常，与 FBox 一致）。
+
+**顺带核实**：`reapk` 的 `write_aligned_zip` **保留原压缩方式**（`e["method"]` 原样写回），
+STORED 的 `.so` 按 **4096** 对齐、其余 STORED 按 4 对齐 → 重打包不会破坏 `extractNativeLibs=false` 的包。
+
+标准交付链路已写入系统提示片段 `80-reverse-engineering.md`：
+`aicode-apk rebuild` → `apkSign` → `sendFile`。
+
+### 10.3 类型判定 + 推荐/框选弹窗（新增）
+
+**判定**：`feature/agent/domain/reverse/ApkTypeDetector.kt`，对齐 FBox `checkApkIsFlutter`
+（`code_off=0x786db4`）：只遍历 ZIP 中央目录条目名，三特征**齐备**才判 Flutter ——
+① `assets/flutter_assets/` 前缀 ② `/libflutter.so`（或裸名）③ `/libapp.so`（或裸名）。
+不解压、不读 Manifest、毫秒级；文件缺失/长度为 0/非法 ZIP 一律按 NATIVE（与 FBox 相同）。
+
+**弹窗**：`feature/agent/presentation/component/ApkRouteDialog.kt`，对齐 FBox `ApkRouteDialog`：
+- 标题「选择分析线路」+ 文件名 + 判定结论文案（命中 Flutter 与未命中两套）
+- 两张 `RouteOptionCard`（Flutter 应用 / 普通应用）
+- **`selected = (卡片类型 == 判定结果)`** → 主色 2dp 描边 + `primaryContainer` 底 + **「推荐」徽标**
+  （这就是 FBox 那圈"自动框选"的真身：不是焦点逻辑）
+- 配色改用本工程主题令牌（`MaterialTheme.colorScheme` + `semanticColors` + `Spacing`/`Radius`），
+  **未沿用 FBox 的 Cyan 硬编码**，遵守 `CLAUDE.md` 主题硬规则
+
+**接线**：`AIChatPanel.handlePickedAttachments` 上传成功回调里，若文件名以 `.apk` 结尾 →
+`withContext(Dispatchers.IO) { ApkTypeDetector.detect(...) }` → 置 `apkRoutePrompt` 状态 → 渲染弹窗。
+选线后 `enqueueAgentRequest` 发一条**带路由指令**的请求（指令里写明「已检测为 Flutter/原生 +
+应读取的技能名」），避免 AI 自己猜类型；同时把该附件从待发列表移除、`followBottom = true`。
+
+文案入 `values/strings.xml`（中文，默认）与 `values-en/strings.xml`（英文）各 9 条 `apk_route_*`。
+
+### 10.4 本批改动文件清单
+
+| 类型 | 文件 |
+|---|---|
+| 新增 | `feature/agent/domain/reverse/ApkTypeDetector.kt` |
+| 新增 | `feature/agent/domain/tool/reverse/ApkSignTool.kt` |
+| 新增 | `feature/agent/presentation/component/ApkRouteDialog.kt` |
+| 修改 | `di/AgentModule.kt`（注册 apkSign） |
+| 修改 | `feature/agent/presentation/component/AIChatPanel.kt`（上传后判定 + 弹窗渲染 + 选线入队） |
+| 修改 | `app/build.gradle.kts`（apksig 依赖） |
+| 修改 | `app/proguard-rules.pro`（apksig keep） |
+| 修改 | `res/values/strings.xml`、`res/values-en/strings.xml`（9 条文案 × 2） |
+| 修改 | `assets/prompts/80-reverse-engineering.md`（签名链路 + apkSign 行） |
+
+### 10.5 仍未做（按建议优先级）
+
+1. `patch_so`（SO 字节补丁）——`aicode-so` 只读，Flutter 补丁链仍断在这一步
+2. Blutter Runner 快通道（18 个 .so + 独立 Service，收益：几分钟 → 秒级）
+3. 补丁柜（留档/回滚）、`reflutter` 接线、知识库经验接线、OCR

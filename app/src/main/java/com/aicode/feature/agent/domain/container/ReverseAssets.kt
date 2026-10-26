@@ -13,8 +13,8 @@ import javax.inject.Singleton
  *
  * 设计对齐 FBox `LinuxManager.ensureFlutterRe()` 的两条原则：
  *
- * 1. **按需解压**：资产随 APK 打在 `assets/reverse/` 下，不预铺进 rootfs；
- *    第一次真正用到时才释放到容器内 `/root/`。
+ * 1. **按需解压**：资产随 APK 打在 `assets/reverse/…`，不预铺进 rootfs；
+ *    第一次真正用到时才释放到容器内 `/root/…`。
  * 2. **版本自愈**：不是"有就跳过"，而是逐项校验关键文件是否齐备、补丁是否在位，
  *    任一缺失就覆盖重解。因此 rootfs 被 [ContainerInstaller.installRootfsIfNeed] 整体删除重装后，
  *    首次使用会自动重建，无需额外持久化。
@@ -22,16 +22,16 @@ import javax.inject.Singleton
  * 与之相对，**用户产出**（知识库 / 补丁柜 / 自定义技能）不可重建，走持久目录 + proot `-b` 绑定，
  * 见 [persistentBindings]。
  *
- * 资产落位表（`assets/reverse/` 下 → 容器 `/root/` 下）：
+ * 资产落位表（assets/reverse/… → 容器 /root/…）：
  * ```
  * apk_tool/apk_tool.py   → /root/apk-tool/apk_tool.py
- * apk_tool/reapk/ 树     → /root/apk-tool/reapk/          (apk_tool.py 的依赖包，必须同级)
+ * apk_tool/reapk/…       → /root/apk-tool/reapk/…        (apk_tool.py 的依赖包，必须同级)
  * so_tool/so_tool.py     → /root/so-tool/so_tool.py
- * flutter-re.tar         → /root/flutter-re/              (blutter 源码工具链，tar 解压)
+ * flutter-re.tar         → /root/flutter-re/…            (blutter 源码工具链，tar 解压)
  * skills/<id>/SKILL.md    → ~/.aicode/skills/<id>/SKILL.md  (AiCode 全局技能根，持久)
  * ```
  * 不落沙箱的资产（App 侧直接用）：`blutter/runners.json`、`blutter/frida.template.js`、
- * `keystore/patch.keystore`、`reflutter/` 树。
+ * `keystore/patch.keystore`、`reflutter/…`。
  *
  * 注意：技能**不放** rootfs 内的 `/root/ai-skills`（那是 FBox 的做法）——AiCode 的技能来自
  * `~/.aicode/skills` 目录式来源，且该目录经 proot `-b` 持久绑定、与 rootfs 重装无关。
@@ -62,8 +62,13 @@ class ReverseAssets @Inject constructor(
             "blutter/extract_dart_info.py",
             "blutter/blutter/src/DartTypes.cpp",   // 承载 FBOX_UNKNOWN_ABSTRACT_TYPE 补丁
             "blutter/blutter/src/ElfHelper.cpp",   // 承载 BLUTTER_DART_SINGLE_SNAPSHOT 补丁
-            "blutter/scripts/CMakeLists.txt"
+            "blutter/scripts/CMakeLists.txt",
+            // 运行期脚本。原 FBox 是 Kotlin heredoc 现场生成，移植改为 assets 常备；落位与 FBox
+            // 一致（/root/flutter-re/ 下）。patch_so.py 是 SO 补丁链的依赖，缺了补丁就断。
+            "patch_so.py",
+            "fbox_gcc13_fix.py"
         )
+
 
         /** 需要持久化的用户产出目录名（容器内 /root/<name>，宿主 filesDir/reverse/<name>）。 */
         private val PERSISTENT_DIRS = listOf("knowledge", "patches", "ai-skills")
@@ -108,7 +113,7 @@ class ReverseAssets @Inject constructor(
     // ---------------------------------------------------------------- 安装
 
     /**
-     * 按需释放全部资产到容器内 `/root/`；已就绪则快速返回。幂等，可在每次进容器前调用。
+     * 按需释放全部资产到容器内 `/root/…`；已就绪则快速返回。幂等，可在每次进容器前调用。
      *
      * [force] 为 true 时忽略版本标记强制重解（排障用）。
      */
@@ -176,7 +181,7 @@ class ReverseAssets @Inject constructor(
         copyAssetFile("$ASSET_DIR/so_tool/so_tool.py", File(dest, "so_tool.py"))
     }
 
-    /** flutter-re.tar → /root/flutter-re/。带逐项自愈：缺任一必需文件即整包覆盖重解。 */
+    /** flutter-re.tar → /root/flutter-re/…。带逐项自愈：缺任一必需文件即整包覆盖重解。 */
     private fun installFlutterReHealing(profile: ContainerProfile) {
         val dest = flutterReDir(profile)
         if (FLUTTER_RE_REQUIRED.all { File(dest, it).isFile }) return
@@ -199,6 +204,8 @@ class ReverseAssets @Inject constructor(
      * 复用 [ContainerInstaller.extractRootfsTo]：它已正确处理目录 / 符号链接 / 硬链接 / 权限位
      * （blutter 源码树里有 symlink 与可执行脚本，必须走这条而不是普通 copy）。
      */
+
+
     private fun installFlutterRe(profile: ContainerProfile) {
         val dest = flutterReDir(profile)
         dest.mkdirs()

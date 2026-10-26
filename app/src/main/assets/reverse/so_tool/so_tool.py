@@ -21,6 +21,7 @@ so 路径为容器内绝对路径（如 /root/out/libxxx.so 或 /root/apk/xxx/li
 import os
 import re
 import sys
+import shutil
 
 try:
     from elftools.elf.elffile import ELFFile
@@ -664,7 +665,101 @@ def cmd_cfg(args):
 
 # ---------------------------------------------------------------- 入口
 
+# ============================================================ patch（写字节补丁）
+
+def _parse_patch_arg(spec: str):
+    """解析 "地址:hex字节" 补丁项。地址十六进制（0x 可选），字节偶数长 hex。
+    示例: 0x1A2B3C:20008052  或  1A2B3C:1F2003D5 (小端指令请自行按字节序给出)
+    """
+    if ":" not in spec:
+        sys.exit("✗ 补丁项格式错误: %r（应为 地址:hex字节，如 0x1A2B3C:20008052）" % spec)
+    a, h = spec.split(":", 1)
+    addr = parse_addr(a.strip())
+    h = h.strip().lower().replace(" ", "")
+    if len(h) == 0 or len(h) % 2 != 0:
+        sys.exit("✗ hex 字节长度必须为偶数: %r" % h)
+    try:
+        data = bytes.fromhex(h)
+    except ValueError:
+        sys.exit("✗ hex 字节不合法: %r" % h)
+    return addr, data
+
+
+def cmd_patch(args):
+    """用法: patch <so> <addr:hex>[:addr:hex...] [--dry]
+
+    在 SO 上打字节补丁（虚拟地址自动换算文件偏移，复用 SoCtx 的 PT_LOAD 回退，
+    加固 so 也能定位）。默认先写 .orig 备份（幂等，仅首次）：
+      <so>.orig   —— 首次 patch 前的原始字节，供回滚（patch --restore <so>）
+    多个补丁项以冒号续接；--dry 只显示将改动的内容，不落盘。
+    """
+    # 回滚分支: patch <so> --restore
+    if "--restore" in args[1:]:
+        if len(args) != 2:
+            sys.exit("✗ --restore 用法: patch <so> --restore")
+        cmd_patch_restore(args)
+    path = so_path(args[0])
+    specs = [a for a in args[1:] if a not in ("--dry", "--restore")]
+    if not specs:
+        sys.exit("✗ 缺少补丁项（地址:hex字节）")
+    dry = "--dry" in args[1:]
+    patches = [_parse_patch_arg(sp) for sp in specs]
+
+    ctx = SoCtx(path)
+
+    # 统一先换算并校验，全部通过才动文件
+    plan = []
+    for addr, data in patches:
+        off, sec = ctx.vaddr_to_off(addr)
+        if off is None:
+            sys.exit("✗ 0x%x 不在任何可加载节（加固 SO 已按 PT_LOAD 重建映射，仍找不到）" % addr)
+        old = ctx.read(addr, len(data))
+        if len(old) != len(data):
+            sys.exit("✗ 0x%x 读取 %d 字节失败（节边界溢出）" % (addr, len(data)))
+        plan.append((addr, off, old, data, sec))
+
+    # 展示计划
+    print("补丁计划（%s）:" % ("DRY" if dry else "将写入"))
+    for addr, off, old, data, sec in plan:
+        note = ""
+        name, delta = ctx.symbolize(addr)
+        if name:
+            note = " (%s+0x%x)" % (name, delta)
+        print("  0x%-8x → off 0x%-6x [%s]%s  %s → %s" %
+              (addr, off, sec or "?", note, old.hex(" "), data.hex(" ")))
+    if dry:
+        print("（--dry，未写盘）")
+        _finish(0)
+
+    # 备份（幂等：只在首次打补丁时留 .orig；之后补丁的基线始终是 .orig）
+    orig = path + ".orig"
+    if not os.path.isfile(orig):
+        shutil.copyfile(path, orig)
+        print("✓ 已备份原始文件 → %s" % orig)
+
+    # 写盘（r+ 定位写，不整文件重写）
+    with open(path, "r+b") as f:
+        for addr, off, old, data, sec in plan:
+            f.seek(off)
+            f.write(data)
+    print("✓ 已写入 %d 处补丁 → %s" % (len(plan), path))
+    _finish(0)
+
+
+def cmd_patch_restore(args):
+    """用法: patch --restore <so>   （从 .orig 恢复并删除备份）"""
+    path = so_path(args[0])
+    orig = path + ".orig"
+    if not os.path.isfile(orig):
+        sys.exit("✗ 无备份可恢复: %s 不存在（该文件从未打过补丁？）" % orig)
+    shutil.copyfile(orig, path)
+    os.remove(orig)
+    print("✓ 已从 %s 恢复 %s（备份已清）" % (orig, path))
+    _finish(0)
+
+
 COMMANDS = {
+    "patch": (cmd_patch, 2, "<so> <addr:hex>[:addr:hex...] [--dry]"),
     "info": (cmd_info, 1, "<so>"),
     "symbols": (cmd_symbols, 1, "<so> [grep]"),
     "jni": (cmd_jni, 1, "<so>"),

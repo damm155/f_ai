@@ -28,16 +28,17 @@ class WorkspacePathMapperTest {
     private val wsRoot = "/data/ws"
     private val aicodeDir = "/data/aicode"
     private val rootfsDir = "/data/rootfs"
-    private val reverseDir = "/data/reverse"
     private val home = "/root"
+    private val reverseRoot = "/data/reverse"
 
     private fun newMapper(): WorkspacePathMapper {
         every { workspaceRepository.currentPath() } returns wsRoot
         every { containerInstaller.aicodeDir } returns File(aicodeDir)
         every { containerInstaller.rootfsDirFor(any()) } returns File(rootfsDir)
         every { containerSettingsRepository.activeProfileIdFlow } returns emptyFlow()
+        every { reverseAssets.persistentRoot() } returns File(reverseRoot)
+        every { reverseAssets.persistentHostDir(any()) } answers { File(reverseRoot, firstArg<String>()) }
         every { pathHomeResolver.home() } returns home
-        every { reverseAssets.persistentRoot() } returns File(reverseDir)
         // expandHome 保持真实展开语义，让 toHostFile 里的 ~ 前缀与生产行为一致
         every { pathHomeResolver.expandHome(any()) } answers {
             val p = firstArg<String>()
@@ -48,11 +49,7 @@ class WorkspacePathMapperTest {
             }
         }
         return WorkspacePathMapper(
-            workspaceRepository,
-            containerInstaller,
-            containerSettingsRepository,
-            pathHomeResolver,
-            reverseAssets
+            workspaceRepository, containerInstaller, containerSettingsRepository, pathHomeResolver, reverseAssets
         )
     }
 

@@ -1618,6 +1618,16 @@
     <string name="browser_dialog_alert_title">网页提示</string>
     <string name="browser_dialog_confirm_title">网页确认</string>
     <string name="browser_dialog_prompt_title">网页输入</string>
+    <!-- 逆向：普通应用确认与清理 -->
+    <string name="apk_native_confirm_title">按普通应用分析？</string>
+    <string name="apk_native_confirm_text">%1$s 未检测到 Flutter 特征，Blutter 无法分析。\n确认后会把该 APK 挂起到待发送区，你在输入框写下需求并发送时会自动带上原生工具链提示。</string>
+    <string name="apk_native_confirm_ok">确认，按普通应用</string>
+    <string name="reverse_clean_action">清理逆向中间产物</string>
+    <string name="reverse_clean_title">清理逆向工作区</string>
+    <string name="reverse_clean_text">将删除以下可再生的中间产物（当前共 %1$s）：\n\n· 工作区附件目录 .aicode/attachments（含已上传的 APK/图片/日志）\n· 容器 /root/apk、/root/out、/root/work\n· flutter-re 的 build / dartsdk / packages\n\n不会动：工具链本体、补丁柜、知识库、自定义技能。</string>
+    <string name="reverse_clean_ok">全部清理</string>
+    <string name="reverse_clean_empty">没有可清理的内容</string>
+    <string name="reverse_clean_done">已释放 %1$s</string>
     <!-- 逆向：Blutter 分析浮窗 -->
     <string name="blutter_phase_ready">准备中</string>
     <string name="blutter_card_running">Blutter 本地分析中… %1$s</string>

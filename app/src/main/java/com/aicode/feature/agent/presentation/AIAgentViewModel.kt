@@ -37,6 +37,7 @@ import com.aicode.feature.settings.data.repository.KeepaliveSettingsRepository
 import com.aicode.feature.settings.data.repository.ModelReasoningEffortRepository
 import com.aicode.feature.settings.data.repository.StartupSessionMode
 import com.aicode.feature.agent.domain.model.AgentContext
+import com.aicode.feature.agent.domain.reverse.ReverseWorkspaceCleaner
 import com.aicode.feature.agent.domain.model.AgentImage
 import com.aicode.feature.agent.domain.model.AgentMessage
 import com.aicode.feature.agent.domain.model.AgentMode
@@ -152,6 +153,7 @@ class AIAgentViewModel @Inject constructor(
     private val todoItemDao: TodoItemDao,
     val fileAccess: FileAccessProvider,
     private val fileChangeHub: FileChangeHub,
+    private val reverseWorkspaceCleaner: ReverseWorkspaceCleaner,
     @param:ApplicationContext private val context: Context
 ) : ViewModel(), SlashCommandContext {
 
@@ -262,6 +264,46 @@ class AIAgentViewModel @Inject constructor(
         val id = _currentSessionId.value ?: return
         _inputDrafts.value = _inputDrafts.value - id
         draftPrefs.edit().remove(id).apply()
+    }
+
+    // ---------------------------------------------------------------- 逆向工作区清理
+
+    /** 可清理字节数（打开清理弹窗时刷新）。 */
+    private val _cleanableBytes = MutableStateFlow(0L)
+    val cleanableBytes: StateFlow<Long> = _cleanableBytes.asStateFlow()
+
+    /** 是否正在清理（按钮去重与进度提示）。 */
+    private val _cleaning = MutableStateFlow(false)
+    val cleaning: StateFlow<Boolean> = _cleaning.asStateFlow()
+
+    /** 刷新可清理体积；目录遍历在 IO 线程。 */
+    fun refreshCleanableSize() {
+        viewModelScope.launch {
+            _cleanableBytes.value = withContext(Dispatchers.IO) {
+                runCatching { reverseWorkspaceCleaner.totalSize() }.getOrDefault(0L)
+            }
+        }
+    }
+
+    /**
+     * 执行清理。返回释放的字节数（失败或已取消时为 null）。
+     * UI 层据此决定 Toast 文案。
+     */
+    suspend fun cleanReverseWorkspace(): Long? {
+        if (_cleaning.value) return null
+        _cleaning.value = true
+        return try {
+            val result = withContext(Dispatchers.IO) { reverseWorkspaceCleaner.clean() }
+            _cleanableBytes.value = withContext(Dispatchers.IO) {
+                runCatching { reverseWorkspaceCleaner.totalSize() }.getOrDefault(0L)
+            }
+            result.freedBytes
+        } catch (e: Exception) {
+            FileLogger.e("AIAgentVM", "清理逆向工作区失败", e)
+            null
+        } finally {
+            _cleaning.value = false
+        }
     }
 
     /**

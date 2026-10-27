@@ -118,6 +118,7 @@ import compose.icons.feathericons.Minimize
 import compose.icons.feathericons.Plus
 import compose.icons.feathericons.Square
 import compose.icons.feathericons.Shield
+import compose.icons.feathericons.Trash2
 import kotlinx.coroutines.launch
 
 /** 输入框区域蒙版高度：盖住圆角容器，滚动内容滑入时被渐变遮罩；随键盘（IME）上移。 */
@@ -184,6 +185,8 @@ internal fun ChatInputBar(
     forceOpenModelSheet: Boolean = false,
     onSelectModelInOnboarding: (() -> Unit)? = null,
     onModelSheetDismiss: (() -> Unit)? = null,
+    /** 点击清理按钮：删除逆向中间产物（附件目录、容器 apk/out/work、blutter build/dartsdk/packages）。 */
+    onCleanReverseWorkspace: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val hasContent = value.isNotBlank() || pendingAttachments.isNotEmpty()
@@ -531,6 +534,25 @@ internal fun ChatInputBar(
                             onChange = onReasoningEffortChange,
                             enabled = !isBusy
                         )
+                        // 清理逆向中间产物（附件目录、容器 apk/out/work、blutter 编译产物）
+                        onCleanReverseWorkspace?.let { onClean ->
+                            IconButton(
+                                onClick = onClean,
+                                enabled = !isBusy,
+                                modifier = Modifier.size(36.dp)
+                            ) {
+                                Icon(
+                                    FeatherIcons.Trash2,
+                                    contentDescription = stringResource(R.string.reverse_clean_action),
+                                    tint = if (isBusy) {
+                                        MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.38f)
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurfaceVariant
+                                    },
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                        }
                     }
                     UploadIconButton(
                         enabled = !isBusy,

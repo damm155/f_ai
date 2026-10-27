@@ -1619,6 +1619,16 @@
     <string name="browser_dialog_alert_title">Page Alert</string>
     <string name="browser_dialog_confirm_title">Page Confirmation</string>
     <string name="browser_dialog_prompt_title">Page Input</string>
+    <!-- Reverse: native-app confirm & cleanup -->
+    <string name="apk_native_confirm_title">Analyze as native app?</string>
+    <string name="apk_native_confirm_text">%1$s has no Flutter features, so Blutter cannot analyze it.\nConfirming keeps it in the pending attachments; when you type your request and send, the native toolchain hint is attached automatically.</string>
+    <string name="apk_native_confirm_ok">Confirm native</string>
+    <string name="reverse_clean_action">Clean reverse intermediates</string>
+    <string name="reverse_clean_title">Clean reverse workspace</string>
+    <string name="reverse_clean_text">The following regenerable intermediates will be deleted (%1$s currently):\n\n· workspace .aicode/attachments (uploaded APKs/images/logs)\n· container /root/apk, /root/out, /root/work\n· flutter-re build / dartsdk / packages\n\nKept: toolchains, patch store, knowledge base, custom skills.</string>
+    <string name="reverse_clean_ok">Clean all</string>
+    <string name="reverse_clean_empty">Nothing to clean</string>
+    <string name="reverse_clean_done">Freed %1$s</string>
     <!-- Reverse: Blutter progress card -->
     <string name="blutter_phase_ready">Preparing</string>
     <string name="blutter_card_running">Blutter analyzing… %1$s</string>

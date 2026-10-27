@@ -35,11 +35,14 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
@@ -77,6 +80,7 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.aicode.feature.agent.domain.reverse.ApkTargetKind
+import com.aicode.feature.agent.domain.reverse.formatSize
 import com.aicode.feature.agent.domain.reverse.ApkTypeDetector
 import com.aicode.feature.agent.domain.reverse.BlutterAnalysisController
 import com.aicode.feature.agent.domain.reverse.BlutterPhase
@@ -700,6 +704,10 @@ fun AIChatPanel(
     var pendingAttachments by remember { mutableStateOf<List<PendingUploadAttachment>>(emptyList()) }
 
     var uploadingCount by remember { mutableStateOf(0) }
+    /** 清理逆向工作区确认框。 */
+    var showCleanReverseDialog by remember { mutableStateOf(false) }
+    /** 待确认的原生应用 APK（对齐 FBox confirmAnalyzeNonFlutter：只挂起，不发送）。 */
+    var nativeConfirmApk by remember { mutableStateOf<String?>(null) }
     var messageForMenu by remember { mutableStateOf<AgentUIMessage?>(null) }
     var editingMessage by remember { mutableStateOf<AgentUIMessage?>(null) }
     var queuedEditing by remember { mutableStateOf<QueuedRequest?>(null) }
@@ -961,9 +969,10 @@ fun AIChatPanel(
                     runCatching {
                         copyUriToWorkspace(context, uri, viewModel.fileAccess, includeImageData = images)
                     }.onSuccess { uploaded ->
-                        // APK 上传时就判定类型（只读 ZIP 目录项，毫秒级），结果随附件保存；
-                        // 发送消息时自动拼进请求做路由提示，不再弹窗打断用户，也不占输入框。
-                        val kind = if (uploaded.fileName.lowercase().endsWith(".apk")) {
+                        // APK 上传时就判定类型（只读 ZIP 目录项，毫秒级）。
+                        // 对齐 FBox confirmAnalyzeNonFlutter：原生应用先弹确认框，确认后才挂进待发区。
+                        val isApk = uploaded.fileName.lowercase().endsWith(".apk")
+                        val kind = if (isApk) {
                             withContext(Dispatchers.IO) {
                                 ApkTypeDetector.detect(File(uploaded.localPath))
                             }
@@ -971,13 +980,23 @@ fun AIChatPanel(
                             null
                         }
                         val justUploaded = uploaded.toPendingAttachment().copy(apkKind = kind)
-                        pendingAttachments = pendingAttachments + justUploaded
-                        successCount += 1
-                        // Flutter 应用：上传即启动本地解析（零 token、秒级），浮窗展示进度；
-                        // 解析完成后用户自己提问即可。不在发送环节代发消息。
-                        if (kind == ApkTargetKind.FLUTTER) {
-                            blutterController.start(uploaded.containerPath)
+                        when (kind) {
+                            ApkTargetKind.NATIVE -> {
+                                // 先暂存，等用户确认；确认后不出现在待发区的逻辑由 nativeConfirmApk 承担
+                                pendingAttachments = pendingAttachments + justUploaded
+                                nativeConfirmApk = uploaded.containerPath
+                            }
+                            ApkTargetKind.FLUTTER -> {
+                                pendingAttachments = pendingAttachments + justUploaded
+                                // Flutter：上传即启动本地解析（零 token、秒级），浮窗展示进度
+                                blutterController.start(uploaded.containerPath)
+                            }
+                            null -> {
+                                // 非 APK 或类型未识别：直接进待发区，发送时按未检测态提示
+                                pendingAttachments = pendingAttachments + justUploaded
+                            }
                         }
+                        successCount += 1
                     }.onFailure { error ->
                         failures += (error.message ?: uploadFallbackError(context))
                     }
@@ -1789,6 +1808,11 @@ fun AIChatPanel(
                 forceOpenModelSheet = onboardingStep == OnboardingStep.SIMULATE_CHOOSE_MODEL,
                 onSelectModelInOnboarding = onSelectModelInOnboarding,
                 onModelSheetDismiss = onDismissModelSheetInOnboarding,
+                onCleanReverseWorkspace = {
+                    // 先刷新体积再弹确认框，让用户看清将释放多少
+                    viewModel.refreshCleanableSize()
+                    showCleanReverseDialog = true
+                },
                 modifier = Modifier
                     .fillMaxWidth()
                     .onboardingTarget(OnboardingStep.SEND_MESSAGE)
@@ -1895,6 +1919,84 @@ fun AIChatPanel(
                     onConfirm = { newContent ->
                         viewModel.updateQueuedRequest(req.id, newContent)
                         queuedEditing = null
+                    }
+                )
+            }
+
+            // 原生应用确认（对齐 FBox confirmAnalyzeNonFlutter）：取消则从待发区移除，不发送任何消息。
+            nativeConfirmApk?.let { apkPath ->
+                AlertDialog(
+                    onDismissRequest = {
+                        pendingAttachments = pendingAttachments.filterNot { it.containerPath == apkPath }
+                        nativeConfirmApk = null
+                    },
+                    containerColor = MaterialTheme.colorScheme.surface,
+                    tonalElevation = 0.dp,
+                    title = { Text(stringResource(R.string.apk_native_confirm_title)) },
+                    text = {
+                        Text(
+                            stringResource(
+                                R.string.apk_native_confirm_text,
+                                apkPath.substringAfterLast('/')
+                            )
+                        )
+                    },
+                    confirmButton = {
+                        TextButton(onClick = { nativeConfirmApk = null }) {
+                            Text(stringResource(R.string.apk_native_confirm_ok))
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(
+                            onClick = {
+                                pendingAttachments = pendingAttachments.filterNot { it.containerPath == apkPath }
+                                nativeConfirmApk = null
+                            }
+                        ) { Text(stringResource(R.string.common_cancel)) }
+                    }
+                )
+            }
+
+            // 清理逆向工作区
+            if (showCleanReverseDialog) {
+                val cleanable by viewModel.cleanableBytes.collectAsStateWithLifecycle()
+                val cleaning by viewModel.cleaning.collectAsStateWithLifecycle()
+                val cleanScope = rememberCoroutineScope()
+                AlertDialog(
+                    onDismissRequest = { if (!cleaning) showCleanReverseDialog = false },
+                    containerColor = MaterialTheme.colorScheme.surface,
+                    tonalElevation = 0.dp,
+                    title = { Text(stringResource(R.string.reverse_clean_title)) },
+                    text = {
+                        Text(
+                            stringResource(
+                                R.string.reverse_clean_text,
+                                formatSize(cleanable)
+                            )
+                        )
+                    },
+                    confirmButton = {
+                        TextButton(
+                            enabled = !cleaning && cleanable > 0,
+                            onClick = {
+                                cleanScope.launch {
+                                    val freed = viewModel.cleanReverseWorkspace()
+                                    showCleanReverseDialog = false
+                                    val msg = if (freed == null) {
+                                        context.getString(R.string.reverse_clean_empty)
+                                    } else {
+                                        context.getString(R.string.reverse_clean_done, formatSize(freed))
+                                    }
+                                    Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        ) { Text(stringResource(R.string.reverse_clean_ok)) }
+                    },
+                    dismissButton = {
+                        TextButton(
+                            enabled = !cleaning,
+                            onClick = { showCleanReverseDialog = false }
+                        ) { Text(stringResource(R.string.common_cancel)) }
                     }
                 )
             }

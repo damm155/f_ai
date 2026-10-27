@@ -937,6 +937,10 @@ fun AIChatPanel(
         pendingAttachments = pendingAttachments.filterIndexed { i, _ -> i != index }
     }
 
+    // Blutter 本地分析：上传 Flutter 应用后自动触发，浮窗展示进度（不耗 AI 额度）
+    val blutterController: BlutterAnalysisController = androidx.hilt.navigation.compose.hiltViewModel()
+    val blutterState by blutterController.state.collectAsStateWithLifecycle()
+
     fun handlePickedAttachments(uris: List<Uri>, images: Boolean) {
         if (uris.isEmpty()) return
         if (projectRoot.isBlank()) {
@@ -1289,10 +1293,6 @@ fun AIChatPanel(
             Triple(streamingText?.length, streamingReasoning?.length, latestMessageCount.value)
         }.collect { calibrateToAnchor() }
     }
-
-    // Blutter 本地分析：选「Flutter 应用」后自动触发，浮窗展示进度（不耗 AI 额度）
-    val blutterController: BlutterAnalysisController = androidx.hilt.navigation.compose.hiltViewModel()
-    val blutterState by blutterController.state.collectAsStateWithLifecycle()
 
     val sendMessage: () -> Unit = {
         val text = inputText.trim()

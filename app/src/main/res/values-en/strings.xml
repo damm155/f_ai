@@ -1619,16 +1619,6 @@
     <string name="browser_dialog_alert_title">Page Alert</string>
     <string name="browser_dialog_confirm_title">Page Confirmation</string>
     <string name="browser_dialog_prompt_title">Page Input</string>
-    <!-- Reverse engineering: APK type-detection dialog (ported from FBox) -->
-    <string name="apk_route_dialog_title">Choose analysis route</string>
-    <string name="apk_route_flutter_detected">Flutter features detected (libflutter.so / libapp.so / flutter_assets). Analyzing as a Flutter app is recommended.</string>
-    <string name="apk_route_native_detected">No Flutter features detected. Analyzing as a native app (Java/Kotlin DEX layer) is recommended.</string>
-    <string name="apk_route_flutter_title">Flutter app</string>
-    <string name="apk_route_flutter_desc">Dart AOT disassembly (blutter) + libapp.so patching</string>
-    <string name="apk_route_native_title">Native app</string>
-    <string name="apk_route_native_desc">AndroidManifest / DEX inspection, patching and repacking (pure Python)</string>
-    <string name="apk_route_recommended">Recommended</string>
-    <string name="apk_route_detecting">Detecting APK type…</string>
     <!-- Reverse: Blutter progress card -->
     <string name="blutter_phase_ready">Preparing</string>
     <string name="blutter_card_running">Blutter analyzing… %1$s</string>

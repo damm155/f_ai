@@ -1618,16 +1618,6 @@
     <string name="browser_dialog_alert_title">网页提示</string>
     <string name="browser_dialog_confirm_title">网页确认</string>
     <string name="browser_dialog_prompt_title">网页输入</string>
-    <!-- 逆向：APK 类型判定弹窗（移植自 FBox） -->
-    <string name="apk_route_dialog_title">选择分析线路</string>
-    <string name="apk_route_flutter_detected">已检测到 Flutter 特征（libflutter.so / libapp.so / flutter_assets），推荐按 Flutter 应用分析。</string>
-    <string name="apk_route_native_detected">未检测到 Flutter 特征，推荐按普通应用分析（Java/Kotlin DEX 层）。</string>
-    <string name="apk_route_flutter_title">Flutter 应用</string>
-    <string name="apk_route_flutter_desc">Dart AOT 反汇编（blutter）＋ libapp.so 补丁</string>
-    <string name="apk_route_native_title">普通应用</string>
-    <string name="apk_route_native_desc">AndroidManifest / DEX 查改与重打包（纯 Python，无需 Java）</string>
-    <string name="apk_route_recommended">推荐</string>
-    <string name="apk_route_detecting">正在识别 APK 类型…</string>
     <!-- 逆向：Blutter 分析浮窗 -->
     <string name="blutter_phase_ready">准备中</string>
     <string name="blutter_card_running">Blutter 本地分析中… %1$s</string>

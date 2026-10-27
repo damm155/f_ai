@@ -76,6 +76,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.aicode.feature.agent.domain.reverse.ApkTargetKind
 import com.aicode.feature.agent.domain.reverse.ApkTypeDetector
 import com.aicode.feature.agent.domain.reverse.BlutterAnalysisController
 import com.aicode.feature.agent.domain.reverse.BlutterPhase
@@ -698,8 +699,6 @@ fun AIChatPanel(
     }
     var pendingAttachments by remember { mutableStateOf<List<PendingUploadAttachment>>(emptyList()) }
 
-    /** APK 类型判定结果；非 null 时展示线路选择弹窗（对齐 FBox 的导入即判定）。 */
-    var apkRoutePrompt by remember { mutableStateOf(null as ApkRouteSelection?) }
     var uploadingCount by remember { mutableStateOf(0) }
     var messageForMenu by remember { mutableStateOf<AgentUIMessage?>(null) }
     var editingMessage by remember { mutableStateOf<AgentUIMessage?>(null) }
@@ -958,15 +957,22 @@ fun AIChatPanel(
                     runCatching {
                         copyUriToWorkspace(context, uri, viewModel.fileAccess, includeImageData = images)
                     }.onSuccess { uploaded ->
-                        val justUploaded = uploaded.toPendingAttachment()
-                        pendingAttachments = pendingAttachments + justUploaded
-                        successCount += 1
-                        // 上传的是 APK 时自动判定类型并弹窗引导线路（判定只读 ZIP 目录项，毫秒级）
-                        if (uploaded.fileName.lowercase().endsWith(".apk")) {
-                            val kind = withContext(Dispatchers.IO) {
+                        // APK 上传时就判定类型（只读 ZIP 目录项，毫秒级），结果随附件保存；
+                        // 发送消息时自动拼进请求做路由提示，不再弹窗打断用户，也不占输入框。
+                        val kind = if (uploaded.fileName.lowercase().endsWith(".apk")) {
+                            withContext(Dispatchers.IO) {
                                 ApkTypeDetector.detect(File(uploaded.localPath))
                             }
-                            apkRoutePrompt = ApkRouteSelection(uploaded.fileName, justUploaded, kind)
+                        } else {
+                            null
+                        }
+                        val justUploaded = uploaded.toPendingAttachment().copy(apkKind = kind)
+                        pendingAttachments = pendingAttachments + justUploaded
+                        successCount += 1
+                        // Flutter 应用：上传即启动本地解析（零 token、秒级），浮窗展示进度；
+                        // 解析完成后用户自己提问即可。不在发送环节代发消息。
+                        if (kind == ApkTargetKind.FLUTTER) {
+                            blutterController.start(uploaded.containerPath)
                         }
                     }.onFailure { error ->
                         failures += (error.message ?: uploadFallbackError(context))
@@ -1878,31 +1884,6 @@ fun AIChatPanel(
                     onConfirm = { newContent ->
                         viewModel.updateMessageContent(message.id, newContent)
                         editingMessage = null
-                    }
-                )
-            }
-
-            apkRoutePrompt?.let { selection ->
-                ApkRouteDialog(
-                    fileName = selection.fileName,
-                    detected = selection.kind,
-                    onDismiss = { apkRoutePrompt = null },
-                    onChoose = { kind ->
-                        apkRoutePrompt = null
-                        if (kind == com.aicode.feature.agent.domain.reverse.ApkTargetKind.FLUTTER) {
-                            // 对齐 FBox / MINIS-PORT 第 5 轮修正：Blutter 本地解析**零 token**，
-                            // 消息不由系统代发——解析完成后用户看到浮窗结果，再自己提问（用户主导）。
-                            blutterController.start(selection.attachment.containerPath)
-                            // 已交给本地解析，从待发区移除，避免误当成聊天附件再上传一次。
-                            pendingAttachments = pendingAttachments.filterNot {
-                                it.containerPath == selection.attachment.containerPath
-                            }
-                        } else {
-                            // 普通应用：不代发消息——上传只是准备材料，用户还没表达要做什么。
-                            // 把路由指令预填到输入框，由用户自己补充意图后发送（与 Flutter 分支一致的用户主导语义）。
-                            // 附件保留在待发送区，用户点发送时随消息一起带上。
-                            viewModel.updateInputDraft(apkRouteInstructionText(selection.fileName, kind))
-                        }
                     }
                 )
             }

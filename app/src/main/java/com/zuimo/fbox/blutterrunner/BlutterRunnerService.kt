@@ -91,6 +91,12 @@ class BlutterRunnerService : Service() {
             writeResult(resultPath, code, err)
             runCatching { File(logPath).appendText("\n[exit code: $code]\n") }
             stopSelf()
+            // 必须让 :blutter 进程真正退出：runner 以 JNI 静态注册导出符号，
+            // 同名的 nativeRun 已绑在第一次 load 的 so 上，进程复用后再 loadLibrary
+            // 另一个版本会失效，native 会毫秒级返回 0（假成功，无产物）。
+            // 先等 500ms 让主进程读到结果文件，再退出进程。
+            runCatching { Thread.sleep(500) }
+            kotlin.system.exitProcess(0)
         }.start()
 
         return START_NOT_STICKY

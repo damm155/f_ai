@@ -117,6 +117,11 @@ class BlutterAnalysisController @Inject constructor(
                         append("✓ libapp.so ${"%.1f".format(libapp.length() / 1048576f)}MB 已就位")
                         val outDir = File(hostRootfs(), "root/out/$name")
                         outDir.mkdirs()
+                        // 清掉上一次分析残留的产物：否则「重跑同一个应用」时，
+                        // hasProducts 会拿旧 pp.txt 当本次结果，把失败误报成成功。
+                        listOf("pp.txt", "objs.txt", "asm", "runner.log").forEach { n ->
+                            runCatching { File(outDir, n).deleteRecursively() }
+                        }
                         val code = runnerExecutor.execute(
                             apkName = name,
                             libappDir = libappDir,
@@ -126,15 +131,22 @@ class BlutterAnalysisController @Inject constructor(
                             onLog = ::append
                         )
                         if (code != null) {
-                            val ok = code == 0
+                            // native 返回 0 不等于真的产出：:blutter 进程复用、目录已有产物时
+                            // 会在毫秒级直接返回 0。必须用 pp.txt/asm/ 作为成功的硬证据。
+                            val produced = hasProducts(outDir)
+                            val ok = code == 0 && produced
+                            if (code == 0 && !produced) {
+                                append("⚠ Runner 返回 0 但未产出 pp.txt/asm（耗时过短，实际未完成）")
+                            }
                             _state.value = _state.value.copy(
                                 running = false,
                                 phase = if (ok) BlutterPhase.DONE else BlutterPhase.FAILED,
                                 exitCode = code,
-                                resultSummary = if (ok)
-                                    "Runner 分析完成：/root/out/$name/（pp.txt / asm/ / objs.txt）"
-                                else
-                                    "Runner 退出码 $code（已记录黑名单，可回退容器编译路线）"
+                                resultSummary = when {
+                                    ok -> "Runner 分析完成：/root/out/$name/（pp.txt / asm/ / objs.txt）"
+                                    code == 0 -> "Runner 未产出结果（exit 0 但无 pp.txt/asm），可重试或走容器编译路线"
+                                    else -> "Runner 退出码 $code（已记录黑名单，可回退容器编译路线）"
+                                }
                             )
                             return@launch
                         }

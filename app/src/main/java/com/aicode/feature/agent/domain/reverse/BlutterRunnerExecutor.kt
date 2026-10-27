@@ -160,8 +160,14 @@ class BlutterRunnerExecutor @Inject constructor(
         val resultFile = File(context.cacheDir, "blutter_run_result_${System.currentTimeMillis()}.json")
         val heartbeatFile = File(context.cacheDir, "blutter_run_heartbeat.json")
         val logFile = File(outDir, "runner.log")
+        // 上轮 :blutter 进程可能还在退出中（它先写结果再 exitProcess）。
+        // 若不等它走完就 startService，新 Intent 会落到旧进程里——那个进程已 load 过别的 runner，
+        // 再 loadLibrary 会失效，native 毫秒级返回 0。心跳文件在此处还是上轮的，删之前才能判新旧。
+        awaitPreviousRunnerGone()
         resultFile.delete()
         heartbeatFile.delete()
+        // tail 偏移是单例成员，跨次分析必须归零，否则第二次会从旧偏移开始读（漏日志）。
+        lastLogLen = 0L
 
         val intent = Intent(context, BlutterRunnerService::class.java).apply {
             putExtra("runner", runner.library)
@@ -217,6 +223,19 @@ class BlutterRunnerExecutor @Inject constructor(
         onLog("✗ Runner 执行超时（${WAIT_TIMEOUT_MS / 1000}s）")
         blacklisted.add(runner.library)
         return null
+    }
+
+    /**
+     * 等 :blutter 进程退出（最长 3s）。用 cmdline 探测仅作辅助——Android 12 上跨进程读 cmdline
+     * 可能被裁成空串，故同时用心跳文件新鲜度判定；两者都判定不了时直接放行不阻塞。
+     */
+    private suspend fun awaitPreviousRunnerGone() {
+        val hb = File(context.cacheDir, "blutter_run_heartbeat.json")
+        val deadline = System.currentTimeMillis() + 3_000L
+        while (System.currentTimeMillis() < deadline) {
+            if (!heartbeatFresh(hb)) return
+            delay(200L)
+        }
     }
 
     /** runner.log 增量 tail：读文件末尾几行喂给 onLog（去重由调用方的 lastLine 承担）。 */

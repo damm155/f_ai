@@ -60,7 +60,7 @@ rx=re.compile(pat, re.I)
 files=[]
 for dp,_,fns in os.walk(root):
     for fn in fns:
-        if fn.endswith(('.txt','.md','.S','.js','.json')): files.append(os.path.join(dp,fn))
+        if fn.endswith(('.txt','.md','.S','.js','.json','.dart')): files.append(os.path.join(dp,fn))
 hits=0
 for f in sorted(files):
     try: lines=open(f,encoding='utf-8',errors='replace').read().splitlines()

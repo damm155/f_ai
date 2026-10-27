@@ -1889,27 +1889,19 @@ fun AIChatPanel(
                     onDismiss = { apkRoutePrompt = null },
                     onChoose = { kind ->
                         apkRoutePrompt = null
-                        val chosen = listOf(selection.attachment)
                         if (kind == com.aicode.feature.agent.domain.reverse.ApkTargetKind.FLUTTER) {
                             // 对齐 FBox / MINIS-PORT 第 5 轮修正：Blutter 本地解析**零 token**，
                             // 消息不由系统代发——解析完成后用户看到浮窗结果，再自己提问（用户主导）。
                             blutterController.start(selection.attachment.containerPath)
+                            // 已交给本地解析，从待发区移除，避免误当成聊天附件再上传一次。
+                            pendingAttachments = pendingAttachments.filterNot {
+                                it.containerPath == selection.attachment.containerPath
+                            }
                         } else {
-                            // 普通应用：无本地解析环节，直接发路由指令让 AI 走 apk-re 链。
-                            val instruction = apkRouteInstructionText(selection.fileName, kind)
-                            viewModel.enqueueAgentRequest(
-                                request = instruction,
-                                modelRequest = appendAttachmentsToRequest(context, instruction, chosen),
-                                currentFile = currentFile,
-                                selectedCode = selectedCode,
-                                projectRoot = projectRoot,
-                                inputImages = emptyList(),
-                                inputAttachments = chosen.toAgentAttachments()
-                            )
-                            followBottom = true
-                        }
-                        pendingAttachments = pendingAttachments.filterNot {
-                            it.containerPath == selection.attachment.containerPath
+                            // 普通应用：不代发消息——上传只是准备材料，用户还没表达要做什么。
+                            // 把路由指令预填到输入框，由用户自己补充意图后发送（与 Flutter 分支一致的用户主导语义）。
+                            // 附件保留在待发送区，用户点发送时随消息一起带上。
+                            viewModel.updateInputDraft(apkRouteInstructionText(selection.fileName, kind))
                         }
                     }
                 )

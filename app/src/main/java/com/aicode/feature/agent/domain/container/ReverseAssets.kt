@@ -52,7 +52,7 @@ class ReverseAssets @Inject constructor(
          * 资产版本。**改动 assets/reverse 下任何内容后 +1**，会触发容器内一次性自愈重解。
          * 写入 `/root/apk-tool/.version`（在 rootfs 内部，随 rootfs 重装一起消失 —— 这正是我们要的）。
          */
-        private const val ASSETS_VERSION = "rev-1"
+        private const val ASSETS_VERSION = "rev-2"
 
         /** flutter-re 自愈校验点：任一缺失即整包覆盖重解（对齐 FBox 的 hasCompleteToolchain / 补丁检查）。 */
         private val FLUTTER_RE_REQUIRED = listOf(
@@ -229,13 +229,25 @@ class ReverseAssets @Inject constructor(
      * 落在 AiCode 的**全局技能根**（`filesDir/aicode/skills`，容器内 `~/.aicode/skills`）：
      * 该目录经 proot `-b` 持久绑定，与 rootfs 重装无关，故不参与自愈重解。
      * 格式要求 `SKILL.md` + frontmatter（`name`/`description`），已在资产内准备好。
+     *
+     * 按内容哈希判断是否需要写：内置技能修正后（如工具名对齐、补防呆规则）必须能覆盖旧版，
+     * 否则老用户永远拿不到新文档；已是最新则不动，避免每次进容器都重写。
      */
     private fun installSkills() {
         val base = File(containerInstaller.aicodeDir, "skills")
         BUILTIN_SKILLS.forEach { id ->
             val src = "$ASSET_DIR/skills/$id/SKILL.md"
             if (!assetExists(src)) return@forEach
-            copyAssetFile(src, File(File(base, id), "SKILL.md"))
+            val dest = File(File(base, id), "SKILL.md")
+            val assetBytes = runCatching {
+                context.assets.open(src).use { it.readBytes() }
+            }.getOrNull() ?: return@forEach
+            val same = dest.isFile &&
+                runCatching { dest.readBytes().contentEquals(assetBytes) }.getOrDefault(false)
+            if (same) return@forEach
+            dest.parentFile?.mkdirs()
+            runCatching { dest.writeBytes(assetBytes) }
+                .onFailure { FileLogger.w(TAG, "内置技能写入失败: $id", it) }
         }
     }
 

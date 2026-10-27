@@ -6,6 +6,7 @@ import android.provider.OpenableColumns
 import com.aicode.R
 import com.aicode.feature.agent.domain.model.AgentImage
 import com.aicode.feature.agent.domain.reverse.ApkTargetKind
+import com.aicode.feature.agent.domain.reverse.appendUserAttachmentContext
 import com.aicode.feature.agent.presentation.AgentAttachment
 import com.aicode.feature.workspace.domain.FileAccessProvider
 import com.aicode.feature.workspace.domain.WorkspacePathMapper
@@ -30,61 +31,22 @@ internal data class PendingUploadAttachment(
     val mimeType: String,
     val sizeBytes: Long,
     val image: AgentImage? = null,
-    /** APK 类型判定结果（上传时由 ApkTypeDetector 得出）；非 APK 为 null。 */
+    /** 用户确认的 APK 路线；未选择或非 APK 为 null。 */
     val apkKind: ApkTargetKind? = null,
 )
 
 internal val PendingUploadAttachment.isImage: Boolean
     get() = image != null
 
-private fun List<PendingUploadAttachment>.toAttachmentText(context: Context): String {
-    if (isEmpty()) return ""
-    return buildString {
-        append(context.getString(R.string.chat_attachment_prefix))
-        this@toAttachmentText.forEach { attachment ->
-            append('\n')
-            append("- ")
-            append(attachment.fileName)
-            append("：")
-            append(attachment.containerPath)
-        }
-        // APK 类型提示随消息自动携带，不占输入框（用户只需写自己的需求）。
-        // 三态对齐 FBox sendAiMessage：已判定 Flutter / 已判定原生 / 未检测（仅限 .apk）。
-        this@toAttachmentText.forEach { attachment ->
-            val isApk = attachment.fileName.lowercase().endsWith(".apk")
-            if (!isApk) return@forEach
-            append("\n\n【系统提示】")
-            append(attachment.containerPath)
-            when (attachment.apkKind) {
-                ApkTargetKind.FLUTTER -> append(
-                    " 为用户选定的 Flutter 应用：走 Flutter 链，先 loadSkill(\"flutter-re\")；" +
-                        "Dart 反汇编用 aicode-blutter 并读 /root/out 下结果，禁止读 apk-re。"
-                )
-                ApkTargetKind.NATIVE -> append(
-                    " 为用户选定的普通（非 Flutter）应用：直接走原生 APK 工具链，" +
-                        "先 loadSkill(\"apk-re\")，再用 aicode-apk 的 info/dex-strings/dex-refs/" +
-                        "dex-method/dex-return，交付前用 apkSign 签名，禁止读 flutter-re。"
-                )
-                null -> append(
-                    " 的类型未检测：分析前必须先用 aicode-blutter --scan 或 " +
-                        "unzip -l 查看是否含 libapp.so/libflutter.so/flutter_assets，" +
-                        "确定是普通应用还是 Flutter 应用后再选对应链路，禁止盲目走 blutter 链。"
-                )
-            }
-        }
-    }
-}
-
 internal fun appendAttachmentsToRequest(
     context: Context,
     request: String,
     attachments: List<PendingUploadAttachment>
-): String {
-    val attachmentText = attachments.toAttachmentText(context)
-    if (attachmentText.isBlank()) return request
-    if (request.isBlank()) return attachmentText
-    return request.trimEnd() + "\n\n" + attachmentText
-}
+): String = appendUserAttachmentContext(
+    request,
+    attachments.toAgentAttachments(),
+    context.getString(R.string.chat_attachment_prefix)
+)
 
 internal fun UploadedWorkspaceFile.toPendingAttachment(): PendingUploadAttachment =
     PendingUploadAttachment(
@@ -120,7 +82,8 @@ internal fun AgentAttachment.toPendingAttachment(): PendingUploadAttachment {
         localPath = localPath,
         mimeType = mimeType,
         sizeBytes = sizeBytes,
-        image = image
+        image = image,
+        apkKind = apkKind
     )
 }
 
@@ -131,7 +94,8 @@ private fun PendingUploadAttachment.toAgentAttachment(): AgentAttachment =
         localPath = localPath,
         mimeType = mimeType,
         sizeBytes = sizeBytes,
-        isImage = isImage
+        isImage = isImage,
+        apkKind = apkKind
     )
 
 internal fun List<PendingUploadAttachment>.toAgentAttachments(): List<AgentAttachment> =
@@ -271,6 +235,24 @@ private fun sanitizeUploadFileName(name: String): String {
         .trim()
         .trim('.')
     return cleaned.ifBlank { "upload" }.take(160)
+}
+
+internal suspend fun PendingUploadAttachment.stageNativeApk(
+    fileAccess: FileAccessProvider
+): PendingUploadAttachment = withContext(Dispatchers.IO) {
+    if (containerPath.substringBeforeLast('/') == "/root/apk") {
+        return@withContext this@stageNativeApk.copy(apkKind = ApkTargetKind.NATIVE)
+    }
+    val name = uniqueUploadName(fileAccess, "/root/apk", fileName)
+    val path = "/root/apk/$name"
+    fileAccess.mkdirs("/root/apk")
+    fileAccess.copy(containerPath, path)
+    copy(
+        fileName = name,
+        containerPath = path,
+        localPath = fileAccess.copyToLocal(path).absolutePath,
+        apkKind = ApkTargetKind.NATIVE
+    )
 }
 
 private fun uniqueUploadName(fileAccess: FileAccessProvider, dir: String, fileName: String): String {

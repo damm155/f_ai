@@ -38,6 +38,7 @@ import com.aicode.feature.settings.data.repository.ModelReasoningEffortRepositor
 import com.aicode.feature.settings.data.repository.StartupSessionMode
 import com.aicode.feature.agent.domain.model.AgentContext
 import com.aicode.feature.agent.domain.reverse.ReverseWorkspaceCleaner
+import com.aicode.feature.agent.presentation.component.AttachmentDraftStore
 import com.aicode.feature.agent.domain.model.AgentImage
 import com.aicode.feature.agent.domain.model.AgentMessage
 import com.aicode.feature.agent.domain.model.AgentMode
@@ -158,6 +159,9 @@ class AIAgentViewModel @Inject constructor(
 ) : ViewModel(), SlashCommandContext {
 
     private val sessionJobs = mutableMapOf<String, Job>()
+    internal val attachmentDrafts = AttachmentDraftStore()
+
+    internal suspend fun prepareAttachmentSession(): String = ensureSession()
 
     /**
      * agent 执行期间持有的 CPU 唤醒锁：熄屏后系统会挂起进程，使流式响应中断、工具调用卡死。
@@ -2328,6 +2332,7 @@ class AIAgentViewModel @Inject constructor(
             _retryStates.value = _retryStates.value - sid
             _queuedRequests.value = _queuedRequests.value - sid
             _inputDrafts.value = _inputDrafts.value - sid
+            attachmentDrafts.clear(sid)
             draftPrefs.edit().remove(sid).apply()
         }
 
@@ -2368,6 +2373,7 @@ class AIAgentViewModel @Inject constructor(
             _retryStates.value = _retryStates.value - sid
             _queuedRequests.value = _queuedRequests.value - sid
             _inputDrafts.value = _inputDrafts.value - sid
+            attachmentDrafts.clear(sid)
             draftPrefs.edit().remove(sid).apply()
         }
 

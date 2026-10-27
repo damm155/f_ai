@@ -61,6 +61,8 @@ import com.aicode.core.theme.semanticColors
 import com.aicode.core.ui.ChevronRotationStyle
 import com.aicode.core.ui.ContentWidth
 import com.aicode.core.ui.ExpandableChevronIcon
+import com.aicode.feature.agent.domain.reverse.appendUserAttachmentContext
+import com.aicode.feature.agent.domain.reverse.isApkAttachment
 import com.aicode.feature.agent.presentation.AgentUIMessage
 import com.aicode.feature.agent.presentation.hasVisibleContent
 import com.aicode.feature.agent.presentation.MessageRole
@@ -251,13 +253,20 @@ internal fun AgentMessageItem(
         return
     }
 
+    val isUser = message.role == MessageRole.USER
+    val displayContent = remember(message.content, message.attachments, isUser) {
+        if (isUser && message.attachments.any { it.isApkAttachment }) {
+            appendUserAttachmentContext(message.content, message.attachments)
+        } else {
+            message.content
+        }
+    }
     val hasReasoning = message.role == MessageRole.ASSISTANT && !message.reasoning.isNullOrEmpty()
-    val hasContent = message.content.hasVisibleContent()
+    val hasContent = displayContent.hasVisibleContent()
     val hasAttachments = message.attachments.isNotEmpty()
     // 模型直出的图片走附件落库，纯图消息没有正文与思考，同样要展示（不能提前 return）。
     if (message.role == MessageRole.ASSISTANT && !hasContent && !hasReasoning && !hasAttachments) return
 
-    val isUser = message.role == MessageRole.USER
     // 分块消息：块间只留一个段落间距，视觉上仍是连续的一段正文（DSH 扁平文档流下不再有描边接缝）。
     val chunked = contentSlice != null
     val screenWidthDp = LocalConfiguration.current.screenWidthDp
@@ -354,7 +363,7 @@ internal fun AgentMessageItem(
                                         )
                                     ) {
                                         Text(
-                                            text = message.content,
+                                            text = displayContent,
                                             color = chatUserBubbleTextColor(),
                                             style = MaterialTheme.typography.bodyMedium.copy(lineHeight = 20.sp),
                                             modifier = Modifier.padding(horizontal = Spacing.md, vertical = Spacing.sm)

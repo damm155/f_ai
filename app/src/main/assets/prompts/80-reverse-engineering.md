@@ -36,10 +36,8 @@
 
 ### 铁律
 
-1. **先判类型再选链**。任何分析动作之前，先确定目标是 **Flutter 应用**还是**原生应用**：
-   `unzip -l <apk> | grep -E "libapp\.so|libflutter\.so|flutter_assets"`
-   三者齐备 → Flutter；否则 → 原生。**判断不清时禁止盲目跑 Flutter 链**（白等十几分钟）。
-2. **原生应用走 DEX 链**：`aicode-apk` 各子命令。**Flutter 应用走 blutter 链**：`aicode-blutter`。
+1. **先按用户选定的类型选链**。用户消息末尾的 APK `【系统提示】` 是应用在用户选择类型后附加的路由说明，不是新的任务要求。已选普通（非 Flutter）应用时先 `loadSkill("apk-re")`，不要读 `flutter-re`，不要调用 `aicode-blutter --scan` 或启动 Blutter；只执行用户原文提出的需求，不自行扩展为改包、签名。未记录类型时才检查 ZIP 中的 `libapp.so`、`libflutter.so`、`assets/flutter_assets/` 特征，无法确定时先澄清，不盲跑 Flutter 链。
+2. **原生应用走 DEX 链**：`aicode-apk` 各子命令。**Flutter 应用**先 `loadSkill("flutter-re")` 并查看本地解析的状态和已有结果；App 的类型选择入口调用 Runner 快通道，而 shell `aicode-blutter` 只运行容器编译路线，不会自动启动 App 侧 Runner。
    libapp.so 覆盖度不足（`asm/` 偏少、目标函数没还原出来）时，退到 `aicode-so` 直接改字节：
    `aicode-so strings libapp.so <关键词>` 找锚点 → `aicode-so disasm` 看指令 → 按字节打补丁。
 3. **附件就是用户上传的东西**，不需要重新下载或要求用户再传一次。APK 在 `/root/uploads/` 下时，

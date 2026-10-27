@@ -1619,10 +1619,18 @@
     <string name="browser_dialog_alert_title">Page Alert</string>
     <string name="browser_dialog_confirm_title">Page Confirmation</string>
     <string name="browser_dialog_prompt_title">Page Input</string>
-    <!-- Reverse: native-app confirm & cleanup -->
-    <string name="apk_native_confirm_title">Analyze as native app?</string>
-    <string name="apk_native_confirm_text">%1$s has no Flutter features, so Blutter cannot analyze it.\nConfirming keeps it in the pending attachments; when you type your request and send, the native toolchain hint is attached automatically.</string>
-    <string name="apk_native_confirm_ok">Confirm native</string>
+    <!-- Reverse: APK routes and cleanup -->
+    <string name="apk_route_dialog_title">Choose app type</string>
+    <string name="apk_route_flutter_detected">Flutter features detected. The Flutter route is recommended; choose the type for this task.</string>
+    <string name="apk_route_native_detected">Complete Flutter features were not detected. The native route is recommended; choose the type for this task.</string>
+    <string name="apk_route_flutter_title">Flutter app</string>
+    <string name="apk_route_flutter_desc">Start local Blutter analysis, then ask the AI about the results.</string>
+    <string name="apk_route_native_title">Native app</string>
+    <string name="apk_route_native_desc">Keep the APK pending and attach the native toolchain hint when you send your request.</string>
+    <string name="apk_route_recommended">Recommended</string>
+    <string name="apk_route_staging">Preparing APK…</string>
+    <string name="apk_route_stage_failed">Failed to prepare APK: %1$s</string>
+    <string name="apk_route_native_staged">APK pending on the native app route: %1$s. It will accompany your next request with the native toolchain hint (AndroidManifest / DEX inspection, patching and signing).</string>
     <string name="reverse_clean_action">Clean reverse intermediates</string>
     <string name="reverse_clean_title">Clean reverse workspace</string>
     <string name="reverse_clean_text">The following regenerable intermediates will be deleted (%1$s currently):\n\n· workspace .aicode/attachments (uploaded APKs/images/logs)\n· container /root/apk, /root/out, /root/work\n· flutter-re build / dartsdk / packages\n\nKept: toolchains, patch store, knowledge base, custom skills.</string>

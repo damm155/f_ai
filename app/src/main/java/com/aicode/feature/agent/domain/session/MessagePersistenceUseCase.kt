@@ -6,6 +6,7 @@ import com.aicode.feature.agent.data.local.entity.AgentMessageEntity
 import com.aicode.feature.agent.domain.model.AgentMessage
 import com.aicode.feature.agent.domain.model.CONTEXT_COMPACTION_MARKER
 import com.aicode.feature.agent.domain.model.CONTEXT_SUMMARY_LEGACY_PREFIX
+import com.aicode.feature.agent.domain.reverse.appendUserAttachmentContext
 import com.aicode.feature.agent.domain.tool.ToolCall
 import com.aicode.feature.agent.presentation.AgentAttachment
 import com.aicode.feature.agent.presentation.MessageRole
@@ -284,21 +285,7 @@ class MessagePersistenceUseCase @Inject constructor(
                         } ?: emptyList()
                     } else emptyList()
 
-                    val finalContent = if (attachments.isNotEmpty()) {
-                        val attachmentText = buildString {
-                            append("附件：")
-                            attachments.forEach { att ->
-                                append('\n')
-                                append("- ")
-                                append(att.fileName)
-                                append("：")
-                                append(att.containerPath)
-                            }
-                        }
-                        if (rawContent.isBlank()) attachmentText else "${rawContent.trimEnd()}\n\n$attachmentText"
-                    } else {
-                        rawContent
-                    }
+                    val finalContent = appendUserAttachmentContext(rawContent, attachments)
 
                     val images = attachments.mapNotNull { it.toAgentImage() }
 

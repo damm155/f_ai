@@ -3,6 +3,7 @@ package com.aicode.feature.agent.presentation
 import androidx.compose.runtime.Immutable
 import com.aicode.feature.agent.domain.model.AgentImage
 import com.aicode.feature.agent.domain.provider.RetryErrorInfo
+import com.aicode.feature.agent.domain.reverse.ApkTargetKind
 import com.aicode.feature.workspace.domain.FileEntry
 import kotlinx.serialization.Serializable
 
@@ -140,7 +141,8 @@ data class AgentAttachment(
     val localPath: String,
     val mimeType: String,
     val sizeBytes: Long,
-    val isImage: Boolean
+    val isImage: Boolean,
+    val apkKind: ApkTargetKind? = null
 )
 
 enum class MessageRole {

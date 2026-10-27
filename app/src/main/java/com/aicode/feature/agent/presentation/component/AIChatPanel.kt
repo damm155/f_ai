@@ -701,13 +701,20 @@ fun AIChatPanel(
     LaunchedEffect(inputText) {
         if (inputText == "/") viewModel.refreshSlashCommands()
     }
-    var pendingAttachments by remember { mutableStateOf<List<PendingUploadAttachment>>(emptyList()) }
+    val attachmentDraft = viewModel.attachmentDrafts[currentSessionId]
+    val pendingAttachments = attachmentDraft.attachments
+    var stagedApkNotice by remember(currentSessionId) { mutableStateOf<String?>(null) }
+    var choosingApkRoute by remember(currentSessionId) { mutableStateOf(false) }
+    LaunchedEffect(stagedApkNotice) {
+        if (stagedApkNotice != null) {
+            delay(4_000L)
+            stagedApkNotice = null
+        }
+    }
 
     var uploadingCount by remember { mutableStateOf(0) }
     /** 清理逆向工作区确认框。 */
     var showCleanReverseDialog by remember { mutableStateOf(false) }
-    /** 待确认的原生应用 APK（对齐 FBox confirmAnalyzeNonFlutter：只挂起，不发送）。 */
-    var nativeConfirmApk by remember { mutableStateOf<String?>(null) }
     var messageForMenu by remember { mutableStateOf<AgentUIMessage?>(null) }
     var editingMessage by remember { mutableStateOf<AgentUIMessage?>(null) }
     var queuedEditing by remember { mutableStateOf<QueuedRequest?>(null) }
@@ -942,10 +949,12 @@ fun AIChatPanel(
     }
 
     fun removePendingAttachment(index: Int) {
-        pendingAttachments = pendingAttachments.filterIndexed { i, _ -> i != index }
+        val sessionId = currentSessionId ?: return
+        val attachment = pendingAttachments.getOrNull(index) ?: return
+        viewModel.attachmentDrafts.removeAttachment(sessionId, attachment.containerPath)
     }
 
-    // Blutter 本地分析：上传 Flutter 应用后自动触发，浮窗展示进度（不耗 AI 额度）
+    // 本地解析由用户选择 Flutter 路线后启动，不代发聊天消息。
     val blutterController: BlutterAnalysisController = androidx.hilt.navigation.compose.hiltViewModel()
     val blutterState by blutterController.state.collectAsStateWithLifecycle()
 
@@ -955,12 +964,16 @@ fun AIChatPanel(
             Toast.makeText(context, emptyWorkspaceMessage(context), Toast.LENGTH_SHORT).show()
             return
         }
-        if (!hasAttachmentSlots(pendingAttachments.size)) {
+        val attachmentCount = pendingAttachments.size + attachmentDraft.routeSelections.size
+        if (!hasAttachmentSlots(attachmentCount)) {
             Toast.makeText(context, maxAttachmentMessage(context, MAX_PENDING_ATTACHMENTS), Toast.LENGTH_SHORT).show()
             return
         }
-        val selected = selectedAttachments(uris, pendingAttachments.size)
+        val selected = selectedAttachments(uris, attachmentCount)
+        val uploadSessionId = currentSessionId
         scope.launch {
+            val targetSessionId = uploadSessionId ?: viewModel.prepareAttachmentSession()
+            if (targetSessionId.isBlank()) return@launch
             var successCount = 0
             val failures = mutableListOf<String>()
             uploadingCount = selected.size
@@ -969,33 +982,18 @@ fun AIChatPanel(
                     runCatching {
                         copyUriToWorkspace(context, uri, viewModel.fileAccess, includeImageData = images)
                     }.onSuccess { uploaded ->
-                        // APK 上传时就判定类型（只读 ZIP 目录项，毫秒级）。
-                        // 对齐 FBox confirmAnalyzeNonFlutter：原生应用先弹确认框，确认后才挂进待发区。
-                        val isApk = uploaded.fileName.lowercase().endsWith(".apk")
-                        val kind = if (isApk) {
+                        val detected = if (uploaded.fileName.endsWith(".apk", ignoreCase = true)) {
                             withContext(Dispatchers.IO) {
                                 ApkTypeDetector.detect(File(uploaded.localPath))
                             }
                         } else {
                             null
                         }
-                        val justUploaded = uploaded.toPendingAttachment().copy(apkKind = kind)
-                        when (kind) {
-                            ApkTargetKind.NATIVE -> {
-                                // 先暂存，等用户确认；确认后不出现在待发区的逻辑由 nativeConfirmApk 承担
-                                pendingAttachments = pendingAttachments + justUploaded
-                                nativeConfirmApk = uploaded.containerPath
-                            }
-                            ApkTargetKind.FLUTTER -> {
-                                pendingAttachments = pendingAttachments + justUploaded
-                                // Flutter：上传即启动本地解析（零 token、秒级），浮窗展示进度
-                                blutterController.start(uploaded.containerPath)
-                            }
-                            null -> {
-                                // 非 APK 或类型未识别：直接进待发区，发送时按未检测态提示
-                                pendingAttachments = pendingAttachments + justUploaded
-                            }
-                        }
+                        viewModel.attachmentDrafts.addUpload(
+                            targetSessionId,
+                            uploaded.toPendingAttachment(),
+                            detected
+                        )
                         successCount += 1
                     }.onFailure { error ->
                         failures += (error.message ?: uploadFallbackError(context))
@@ -1330,10 +1328,12 @@ fun AIChatPanel(
                 selectedCode = selectedCode,
                 projectRoot = projectRoot,
                 inputImages = images,
-                inputAttachments = attachments.toAgentAttachments()
+                inputAttachments = attachments.toAgentAttachments(),
+                targetSessionId = currentSessionId
             )
             viewModel.clearInputDraft()
-            pendingAttachments = emptyList()
+            currentSessionId?.let { viewModel.attachmentDrafts.consume(it, attachments) }
+            stagedApkNotice = null
             followBottom = true
             scope.launch {
                 kotlinx.coroutines.delay(0)
@@ -1757,6 +1757,7 @@ fun AIChatPanel(
                 reasoningEffort = reasoningEffort,
                 onReasoningEffortChange = { viewModel.setSessionReasoningEffort(it) },
                 pendingAttachments = pendingAttachments,
+                stagedApkNotice = stagedApkNotice,
                 onRemoveAttachment = ::removePendingAttachment,
                 canUploadFiles = canUploadFiles,
                 canUploadImages = canUploadImages,
@@ -1878,7 +1879,12 @@ fun AIChatPanel(
                     onOptionSelected = { option ->
                         viewModel.executeRewindOption(targetId, option) { text, attachments ->
                             viewModel.updateInputDraft(text)
-                            pendingAttachments = attachments.map { it.toPendingAttachment() }
+                            currentSessionId?.let { sessionId ->
+                                viewModel.attachmentDrafts.replaceAttachments(
+                                    sessionId,
+                                    attachments.map { it.toPendingAttachment() }
+                                )
+                            }
                         }
                     },
                     onDismissRequest = { viewModel.dismissRewindMenu() }
@@ -1923,38 +1929,50 @@ fun AIChatPanel(
                 )
             }
 
-            // 原生应用确认（对齐 FBox confirmAnalyzeNonFlutter）：取消则从待发区移除，不发送任何消息。
-            nativeConfirmApk?.let { apkPath ->
-                AlertDialog(
-                    onDismissRequest = {
-                        pendingAttachments = pendingAttachments.filterNot { it.containerPath == apkPath }
-                        nativeConfirmApk = null
-                    },
-                    containerColor = MaterialTheme.colorScheme.surface,
-                    tonalElevation = 0.dp,
-                    title = { Text(stringResource(R.string.apk_native_confirm_title)) },
-                    text = {
-                        Text(
-                            stringResource(
-                                R.string.apk_native_confirm_text,
-                                apkPath.substringAfterLast('/')
-                            )
-                        )
-                    },
-                    confirmButton = {
-                        TextButton(onClick = { nativeConfirmApk = null }) {
-                            Text(stringResource(R.string.apk_native_confirm_ok))
-                        }
-                    },
-                    dismissButton = {
-                        TextButton(
-                            onClick = {
-                                pendingAttachments = pendingAttachments.filterNot { it.containerPath == apkPath }
-                                nativeConfirmApk = null
+            attachmentDraft.routeSelections.firstOrNull()?.let { selection ->
+                val sessionId = currentSessionId
+                if (sessionId != null) {
+                    ApkRouteDialog(
+                        fileName = selection.attachment.fileName,
+                        detected = selection.detected,
+                        enabled = !choosingApkRoute,
+                        onDismiss = {
+                            viewModel.attachmentDrafts.dismissRoute(sessionId, selection.attachment.containerPath)
+                        },
+                        onChoose = { kind ->
+                            choosingApkRoute = true
+                            scope.launch {
+                                try {
+                                    val attachment = if (kind == ApkTargetKind.NATIVE) {
+                                        selection.attachment.stageNativeApk(viewModel.fileAccess)
+                                    } else {
+                                        selection.attachment.copy(apkKind = kind)
+                                    }
+                                    val attached = viewModel.attachmentDrafts.chooseRoute(
+                                        sessionId,
+                                        selection.attachment.containerPath,
+                                        attachment
+                                    )
+                                    if (attached && kind == ApkTargetKind.NATIVE) {
+                                        stagedApkNotice = attachment.containerPath
+                                    } else if (attached) {
+                                        blutterController.start(attachment.containerPath)
+                                    }
+                                } catch (e: kotlinx.coroutines.CancellationException) {
+                                    throw e
+                                } catch (e: Exception) {
+                                    Toast.makeText(
+                                        context,
+                                        context.getString(R.string.apk_route_stage_failed, e.message.orEmpty()),
+                                        Toast.LENGTH_LONG
+                                    ).show()
+                                } finally {
+                                    choosingApkRoute = false
+                                }
                             }
-                        ) { Text(stringResource(R.string.common_cancel)) }
-                    }
-                )
+                        }
+                    )
+                }
             }
 
             // 清理逆向工作区

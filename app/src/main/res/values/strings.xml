@@ -1618,10 +1618,18 @@
     <string name="browser_dialog_alert_title">网页提示</string>
     <string name="browser_dialog_confirm_title">网页确认</string>
     <string name="browser_dialog_prompt_title">网页输入</string>
-    <!-- 逆向：普通应用确认与清理 -->
-    <string name="apk_native_confirm_title">按普通应用分析？</string>
-    <string name="apk_native_confirm_text">%1$s 未检测到 Flutter 特征，Blutter 无法分析。\n确认后会把该 APK 挂起到待发送区，你在输入框写下需求并发送时会自动带上原生工具链提示。</string>
-    <string name="apk_native_confirm_ok">确认，按普通应用</string>
+    <!-- 逆向：APK 路线与清理 -->
+    <string name="apk_route_dialog_title">选择应用类型</string>
+    <string name="apk_route_flutter_detected">检测到 Flutter 特征，推荐 Flutter 路线。请选择本次要使用的类型。</string>
+    <string name="apk_route_native_detected">未检测到完整 Flutter 特征，推荐普通应用路线。请选择本次要使用的类型。</string>
+    <string name="apk_route_flutter_title">Flutter 应用</string>
+    <string name="apk_route_flutter_desc">启动本地 Blutter 解析，随后可向 AI 提问。</string>
+    <string name="apk_route_native_title">普通应用</string>
+    <string name="apk_route_native_desc">挂起 APK，等你输入需求并发送时带上原生 APK 工具链提示。</string>
+    <string name="apk_route_recommended">推荐</string>
+    <string name="apk_route_staging">正在准备 APK…</string>
+    <string name="apk_route_stage_failed">准备 APK 失败：%1$s</string>
+    <string name="apk_route_native_staged">已按「普通应用」线路挂起 APK：%1$s。输入需求并发送后会自动带上，走原生工具链（AndroidManifest / DEX 查改 + 签名）。</string>
     <string name="reverse_clean_action">清理逆向中间产物</string>
     <string name="reverse_clean_title">清理逆向工作区</string>
     <string name="reverse_clean_text">将删除以下可再生的中间产物（当前共 %1$s）：\n\n· 工作区附件目录 .aicode/attachments（含已上传的 APK/图片/日志）\n· 容器 /root/apk、/root/out、/root/work\n· flutter-re 的 build / dartsdk / packages\n\n不会动：工具链本体、补丁柜、知识库、自定义技能。</string>

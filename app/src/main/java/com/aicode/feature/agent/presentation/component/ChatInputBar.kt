@@ -110,6 +110,7 @@ import compose.icons.FeatherIcons
 import compose.icons.feathericons.AlertCircle
 import compose.icons.feathericons.ArrowUp
 import compose.icons.feathericons.Check
+import compose.icons.feathericons.CheckCircle
 import compose.icons.feathericons.ChevronDown
 import compose.icons.feathericons.ChevronUp
 import compose.icons.feathericons.Copy
@@ -177,6 +178,7 @@ internal fun ChatInputBar(
     blutterState: com.aicode.feature.agent.domain.reverse.BlutterUiState? = null,
     onBlutterDismiss: () -> Unit = {},
     onBlutterCancel: () -> Unit = {},
+    stagedApkNotice: String? = null,
     sessionId: String = "",
     onTodoExpandedChange: (Boolean) -> Unit = {},
     forceCollapseDashboard: Boolean = false,
@@ -343,6 +345,33 @@ internal fun ChatInputBar(
                     onEditQueued = onEditQueued,
                     onInterjectQueued = onInterjectQueued
                 )
+            }
+
+            if (stagedApkNotice != null) {
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(Radius.mdLarge),
+                    color = MaterialTheme.semanticColors.success.copy(alpha = 0.12f)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(Spacing.md),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(Spacing.sm)
+                    ) {
+                        Icon(
+                            FeatherIcons.CheckCircle,
+                            contentDescription = null,
+                            tint = MaterialTheme.semanticColors.success,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Text(
+                            text = stringResource(R.string.apk_route_native_staged, stagedApkNotice),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.semanticColors.success,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                }
             }
 
             if (blutterState != null && blutterState.phase != com.aicode.feature.agent.domain.reverse.BlutterPhase.IDLE) {

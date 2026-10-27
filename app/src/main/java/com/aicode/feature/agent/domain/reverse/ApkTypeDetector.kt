@@ -1,9 +1,11 @@
 package com.aicode.feature.agent.domain.reverse
 
+import kotlinx.serialization.Serializable
 import java.io.File
 import java.util.zip.ZipFile
 
 /** APK 目标类型。 */
+@Serializable
 enum class ApkTargetKind {
     /** 含 Flutter 特征（`libapp.so` / `libflutter.so` / `assets/flutter_assets/`）。 */
     FLUTTER,

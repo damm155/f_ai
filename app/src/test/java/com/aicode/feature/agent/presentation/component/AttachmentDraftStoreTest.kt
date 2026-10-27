@@ -3,6 +3,7 @@ package com.aicode.feature.agent.presentation.component
 import com.aicode.feature.agent.domain.reverse.ApkTargetKind
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -97,6 +98,46 @@ class AttachmentDraftStoreTest {
         store.chooseRoute("a", upload.containerPath, upload.copy(apkKind = ApkTargetKind.NATIVE))
         assertEquals(1, store["a"].attachments.size)
         assertEquals(ApkTargetKind.NATIVE, store["a"].attachments.single().apkKind)
+    }
+
+    @Test
+    fun outputBindingWorksWithoutPendingApksAndSurvivesSend() {
+        val store = AttachmentDraftStore()
+        store.bindOutput("a", "/root/out/123云盘_3.3.0")
+        assertTrue(store["a"].attachments.isEmpty())
+        store.consume("a", emptyList())
+        assertEquals("/root/out/123云盘_3.3.0", store["a"].boundOutputDir)
+        assertNull(store["b"].boundOutputDir)
+        store.bindOutput("b", "/root/out/JavDB")
+        assertEquals("/root/out/123云盘_3.3.0", store["a"].boundOutputDir)
+    }
+
+    @Test
+    fun hiddenFlutterAttachmentStillGetsSentAndDoesNotReplaceBinding() {
+        val store = AttachmentDraftStore()
+        val upload = apk("flutter.apk")
+        store.bindOutput("a", "/root/out/previous")
+        store.addUpload("a", upload, ApkTargetKind.FLUTTER)
+        store.chooseRoute("a", upload.containerPath, upload.copy(apkKind = ApkTargetKind.FLUTTER, hideFromInputPreview = true))
+        assertEquals(1, store["a"].attachments.size)
+        assertTrue(store["a"].attachments.single().hideFromInputPreview)
+        store.consume("a", store["a"].attachments)
+        assertTrue(store["a"].attachments.isEmpty())
+        assertEquals("/root/out/previous", store["a"].boundOutputDir)
+    }
+
+    @Test
+    fun unbindingDoesNotRemoveAttachmentsOrOtherSessionBindings() {
+        val store = AttachmentDraftStore()
+        val upload = apk("flutter.apk")
+        store.addUpload("a", upload, ApkTargetKind.FLUTTER)
+        store.chooseRoute("a", upload.containerPath, upload.copy(apkKind = ApkTargetKind.FLUTTER, hideFromInputPreview = true))
+        store.bindOutput("a", "/root/out/flutter")
+        store.bindOutput("b", "/root/out/other")
+        store.unbindOutput("a")
+        assertNull(store["a"].boundOutputDir)
+        assertEquals(1, store["a"].attachments.size)
+        assertEquals("/root/out/other", store["b"].boundOutputDir)
     }
 
     @Test

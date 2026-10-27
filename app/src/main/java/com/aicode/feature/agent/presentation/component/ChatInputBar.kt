@@ -99,6 +99,7 @@ import com.aicode.feature.agent.domain.tool.PendingToolPermission
 import com.aicode.feature.agent.domain.tool.mode.PlanApprovalRequest
 import com.aicode.feature.agent.presentation.AgentUIState
 import com.aicode.feature.agent.presentation.QueuedRequest
+import com.aicode.feature.agent.domain.reverse.AnalysisOutputDirectory
 import com.aicode.feature.settings.domain.model.AIProviderConfig
 import com.aicode.feature.settings.domain.model.ModelMetadata
 import com.aicode.feature.settings.domain.model.modelMetadataKey
@@ -114,6 +115,7 @@ import compose.icons.feathericons.CheckCircle
 import compose.icons.feathericons.ChevronDown
 import compose.icons.feathericons.ChevronUp
 import compose.icons.feathericons.Copy
+import compose.icons.feathericons.Link2
 import compose.icons.feathericons.Maximize
 import compose.icons.feathericons.Minimize
 import compose.icons.feathericons.Plus
@@ -179,6 +181,13 @@ internal fun ChatInputBar(
     onBlutterDismiss: () -> Unit = {},
     onBlutterCancel: () -> Unit = {},
     stagedApkNotice: String? = null,
+    boundOutputDir: String? = null,
+    analysisOutputs: List<AnalysisOutputDirectory> = emptyList(),
+    analysisOutputsLoading: Boolean = false,
+    analysisOutputsError: String? = null,
+    onOpenOutputBinding: () -> Unit = {},
+    onBindOutput: (String) -> Unit = {},
+    onUnbindOutput: () -> Unit = {},
     sessionId: String = "",
     onTodoExpandedChange: (Boolean) -> Unit = {},
     forceCollapseDashboard: Boolean = false,
@@ -194,6 +203,7 @@ internal fun ChatInputBar(
     val hasContent = value.isNotBlank() || pendingAttachments.isNotEmpty()
     val canSend = hasContent
     var showAttachmentSheet by remember { mutableStateOf(false) }
+    var showOutDirPicker by remember(sessionId) { mutableStateOf(false) }
     var showFullScreenInput by remember { mutableStateOf(false) }
     // TextField 的 String 重载在整串替换时会保留旧 selection 下标（点快捷命令补全时光标会停在中间），
     // 这里自持 TextFieldValue：外部改值时把光标移到末尾。
@@ -380,7 +390,9 @@ internal fun ChatInputBar(
                     sessionId = sessionId,
                     forceCollapse = forceCollapseDashboard,
                     onDismiss = onBlutterDismiss,
-                    onCancel = onBlutterCancel
+                    onCancel = onBlutterCancel,
+                    onBindOutput = { onBindOutput(blutterState.outDir) },
+                    canBindOutput = !isBusy
                 )
             }
 
@@ -582,6 +594,29 @@ internal fun ChatInputBar(
                                 )
                             }
                         }
+                        IconButton(
+                            onClick = {
+                                onOpenOutputBinding()
+                                showOutDirPicker = true
+                            },
+                            enabled = !isBusy,
+                            modifier = Modifier.size(36.dp)
+                        ) {
+                            Icon(
+                                FeatherIcons.Link2,
+                                contentDescription = if (boundOutputDir == null) {
+                                    stringResource(R.string.analysis_binding_action)
+                                } else {
+                                    stringResource(R.string.analysis_binding_current, boundOutputDir)
+                                },
+                                tint = when {
+                                    isBusy -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.38f)
+                                    boundOutputDir != null -> MaterialTheme.colorScheme.primary
+                                    else -> MaterialTheme.colorScheme.onSurfaceVariant
+                                },
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
                     }
                     UploadIconButton(
                         enabled = !isBusy,
@@ -613,6 +648,26 @@ internal fun ChatInputBar(
                 onTakePhoto()
             },
             onDismiss = { showAttachmentSheet = false }
+        )
+    }
+
+    if (showOutDirPicker) {
+        AnalysisOutputPicker(
+            current = boundOutputDir,
+            available = analysisOutputs,
+            loading = analysisOutputsLoading,
+            error = analysisOutputsError,
+            enabled = !isBusy,
+            onDismiss = { showOutDirPicker = false },
+            onRefresh = onOpenOutputBinding,
+            onUnbind = {
+                onUnbindOutput()
+                showOutDirPicker = false
+            },
+            onPick = { dir ->
+                showOutDirPicker = false
+                onBindOutput(dir)
+            }
         )
     }
 

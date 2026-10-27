@@ -111,6 +111,22 @@ class ChatAttachmentUtilsTest {
     }
 
     @Test
+    fun flutterAttachmentStillSendsFileAndRouteWithHiddenPreview() {
+        val context = mockk<Context>()
+        every { context.getString(R.string.chat_attachment_prefix) } returns "附件："
+        val apk = apk().copy(
+            apkKind = ApkTargetKind.FLUTTER,
+            hideFromInputPreview = true,
+            containerPath = "/root/uploads/FBox.apk"
+        )
+        val request = appendAttachmentsToRequest(context, "分析", listOf(apk))
+        assertTrue(request.contains("/root/uploads/FBox.apk"))
+        assertTrue(request.contains("为用户选定的 Flutter 应用"))
+        assertTrue(request.contains("不重复启动解析"))
+        assertTrue(request.startsWith("分析\n\n（随消息附带文件"))
+    }
+
+    @Test
     fun ordinaryFilesDoNotAcquireApkRouting() {
         val context = mockk<Context>()
         every { context.getString(R.string.chat_attachment_prefix) } returns "附件："

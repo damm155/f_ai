@@ -282,12 +282,15 @@ class BlutterRunnerExecutor @Inject constructor(
             val want = listOf("lib/arm64-v8a/libapp.so", "lib/arm64-v8a/libflutter.so")
             ZipFile(apkFile).use { z ->
                 for (name in want) {
-                    val e = z.getEntry(name) ?: continue
                     val out = File(baseDir, name)
-                    out.parentFile?.mkdirs()
-                    if (!out.isFile || out.length() != e.size) {
-                        z.getInputStream(e).use { ins -> out.outputStream().use { ins.copyTo(it) } }
+                    val e = z.getEntry(name)
+                    if (e == null) {
+                        if (out.isFile && !out.delete()) throw java.io.IOException("Cannot remove stale Flutter input")
+                        continue
                     }
+                    out.parentFile?.mkdirs()
+                    // 缓存检查已经失败，本轮必须使用当前 APK 的输入，不能按相同长度复用旧库。
+                    z.getInputStream(e).use { ins -> out.outputStream().use { ins.copyTo(it) } }
                 }
             }
             val libapp = File(dest, "libapp.so")

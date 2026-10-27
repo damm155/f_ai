@@ -6,6 +6,7 @@ import com.aicode.feature.agent.domain.container.ContainerInstaller
 import com.aicode.feature.agent.domain.memory.MemoryRepository
 import com.aicode.feature.agent.domain.memory.MemoryScope
 import com.aicode.feature.agent.domain.model.AgentContext
+import com.aicode.feature.agent.domain.reverse.appendBoundAnalysisWorkspacePrompt
 import com.aicode.feature.agent.domain.skill.SkillRepository
 import com.aicode.feature.agent.domain.subagent.AgentDefinition
 import com.aicode.feature.agent.domain.subagent.AgentDefinitionRepository
@@ -241,10 +242,12 @@ class SystemPromptProvider @Inject constructor(
     }
 
     fun build(agentContext: AgentContext): String {
-        agentContext.agentDefinition?.let { return buildForSubAgent(it, agentContext) }
+        agentContext.agentDefinition?.let {
+            return appendBoundAnalysisWorkspacePrompt(buildForSubAgent(it, agentContext), agentContext.boundAnalysis)
+        }
 
         if (PromptFragmentResolver.isBuiltinDisabled(customDir)) {
-            return buildCustomOnly(agentContext)
+            return appendBoundAnalysisWorkspacePrompt(buildCustomOnly(agentContext), agentContext.boundAnalysis)
         }
 
         // 1. 获取各个 Source 的基线快照。
@@ -271,7 +274,7 @@ class SystemPromptProvider @Inject constructor(
         )
 
         // 4. 压缩空清单展开留下的多余空行；稳定基线在前、动态内容集中在末尾片段，均利于 KV Cache。
-        return collapseBlankLines(staticContent)
+        return appendBoundAnalysisWorkspacePrompt(collapseBlankLines(staticContent), agentContext.boundAnalysis)
     }
 
     /**

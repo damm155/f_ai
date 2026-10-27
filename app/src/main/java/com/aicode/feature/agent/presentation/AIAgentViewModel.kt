@@ -38,6 +38,11 @@ import com.aicode.feature.settings.data.repository.ModelReasoningEffortRepositor
 import com.aicode.feature.settings.data.repository.StartupSessionMode
 import com.aicode.feature.agent.domain.model.AgentContext
 import com.aicode.feature.agent.domain.reverse.ReverseWorkspaceCleaner
+import com.aicode.feature.agent.domain.reverse.AnalysisOutputDirectory
+import com.aicode.feature.agent.domain.reverse.BoundAnalysisWorkspace
+import com.aicode.feature.agent.domain.reverse.hasAnalysisProducts
+import com.aicode.feature.agent.domain.reverse.isAnalysisOutputPath
+import com.aicode.feature.agent.domain.reverse.listAnalysisOutputs
 import com.aicode.feature.agent.presentation.component.AttachmentDraftStore
 import com.aicode.feature.agent.domain.model.AgentImage
 import com.aicode.feature.agent.domain.model.AgentMessage
@@ -162,6 +167,46 @@ class AIAgentViewModel @Inject constructor(
     internal val attachmentDrafts = AttachmentDraftStore()
 
     internal suspend fun prepareAttachmentSession(): String = ensureSession()
+
+    private val _analysisOutputs = MutableStateFlow<List<AnalysisOutputDirectory>>(emptyList())
+    internal val analysisOutputs: StateFlow<List<AnalysisOutputDirectory>> = _analysisOutputs.asStateFlow()
+    private val _analysisOutputsLoading = MutableStateFlow(false)
+    internal val analysisOutputsLoading = _analysisOutputsLoading.asStateFlow()
+    private val _analysisOutputsError = MutableStateFlow<String?>(null)
+    internal val analysisOutputsError = _analysisOutputsError.asStateFlow()
+
+    internal fun refreshAnalysisOutputs() = viewModelScope.launch {
+        _analysisOutputsLoading.value = true
+        _analysisOutputsError.value = null
+        try {
+            _analysisOutputs.value = withContext(Dispatchers.IO) { listAnalysisOutputs(fileAccess) }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            _analysisOutputs.value = emptyList()
+            _analysisOutputsError.value = e.message ?: e.javaClass.simpleName
+        } finally {
+            _analysisOutputsLoading.value = false
+        }
+    }
+
+    internal suspend fun bindAnalysisOutput(sessionId: String, path: String): Boolean {
+        if (!isAnalysisOutputPath(path)) return false
+        val exists = withContext(Dispatchers.IO) { fileAccess.isDirectory(path) }
+        if (!exists) return false
+        attachmentDrafts.bindOutput(sessionId, path)
+        return true
+    }
+
+    private suspend fun boundAnalysisContext(sessionId: String): BoundAnalysisWorkspace? {
+        val path = attachmentDrafts[sessionId].boundOutputDir ?: return null
+        return withContext(Dispatchers.IO) {
+            val hasResults = runCatching { hasAnalysisProducts(fileAccess, path) }.getOrDefault(false)
+            val candidate = "/root/apk/${path.substringAfterLast('/')}.apk"
+            val apkPath = candidate.takeIf { runCatching { fileAccess.isFile(it) }.getOrDefault(false) }
+            BoundAnalysisWorkspace(path, apkPath, hasResults)
+        }
+    }
 
     /**
      * agent 执行期间持有的 CPU 唤醒锁：熄屏后系统会挂起进程，使流式响应中断、工具调用卡死。
@@ -1606,7 +1651,8 @@ class AIAgentViewModel @Inject constructor(
                 mode = mode,
                 modeBeforePlan = sessionDomain?.modeBeforePlan,
                 reasoningEffort = sessionDomain?.reasoningEffort?.apiValue,
-                agentDefinition = agentDefinition
+                agentDefinition = agentDefinition,
+                boundAnalysis = boundAnalysisContext(sessionId)
             )
 
             val allTools = toolRegistry.getAvailableTools()

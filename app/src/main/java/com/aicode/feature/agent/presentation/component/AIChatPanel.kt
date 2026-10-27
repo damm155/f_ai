@@ -703,6 +703,10 @@ fun AIChatPanel(
     }
     val attachmentDraft = viewModel.attachmentDrafts[currentSessionId]
     val pendingAttachments = attachmentDraft.attachments
+    val boundOutputDir = attachmentDraft.boundOutputDir
+    val analysisOutputs by viewModel.analysisOutputs.collectAsStateWithLifecycle()
+    val analysisOutputsLoading by viewModel.analysisOutputsLoading.collectAsStateWithLifecycle()
+    val analysisOutputsError by viewModel.analysisOutputsError.collectAsStateWithLifecycle()
     var stagedApkNotice by remember(currentSessionId) { mutableStateOf<String?>(null) }
     var choosingApkRoute by remember(currentSessionId) { mutableStateOf(false) }
     LaunchedEffect(stagedApkNotice) {
@@ -957,6 +961,22 @@ fun AIChatPanel(
     // 本地解析由用户选择 Flutter 路线后启动，不代发聊天消息。
     val blutterController: BlutterAnalysisController = androidx.hilt.navigation.compose.hiltViewModel()
     val blutterState by blutterController.state.collectAsStateWithLifecycle()
+    fun bindAnalysisOutput(path: String) {
+        val requestedSessionId = currentSessionId
+        scope.launch {
+            val sessionId = requestedSessionId ?: viewModel.prepareAttachmentSession()
+            if (sessionId.isBlank()) return@launch
+            try {
+                if (!viewModel.bindAnalysisOutput(sessionId, path)) {
+                    Toast.makeText(context, context.getString(R.string.analysis_binding_missing), Toast.LENGTH_LONG).show()
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Toast.makeText(context, context.getString(R.string.analysis_binding_error, e.message.orEmpty()), Toast.LENGTH_LONG).show()
+            }
+        }
+    }
 
     fun handlePickedAttachments(uris: List<Uri>, images: Boolean) {
         if (uris.isEmpty()) return
@@ -1758,6 +1778,13 @@ fun AIChatPanel(
                 onReasoningEffortChange = { viewModel.setSessionReasoningEffort(it) },
                 pendingAttachments = pendingAttachments,
                 stagedApkNotice = stagedApkNotice,
+                boundOutputDir = boundOutputDir,
+                analysisOutputs = analysisOutputs,
+                analysisOutputsLoading = analysisOutputsLoading,
+                analysisOutputsError = analysisOutputsError,
+                onOpenOutputBinding = { viewModel.refreshAnalysisOutputs() },
+                onBindOutput = ::bindAnalysisOutput,
+                onUnbindOutput = { currentSessionId?.let { viewModel.attachmentDrafts.unbindOutput(it) } },
                 onRemoveAttachment = ::removePendingAttachment,
                 canUploadFiles = canUploadFiles,
                 canUploadImages = canUploadImages,
@@ -1776,7 +1803,7 @@ fun AIChatPanel(
                 onInterjectQueued = { viewModel.interjectQueuedRequest(it) },
                 dashboardState = currentDashboardState,
                 todoItems = currentTodoItems,
-                blutterState = blutterState,
+                blutterState = blutterState.takeIf { it.sessionId == currentSessionId },
                 onBlutterDismiss = { blutterController.dismiss() },
                 onBlutterCancel = { blutterController.cancel() },
                 sessionId = currentSessionId.orEmpty(),
@@ -1943,20 +1970,28 @@ fun AIChatPanel(
                             choosingApkRoute = true
                             scope.launch {
                                 try {
-                                    val attachment = if (kind == ApkTargetKind.NATIVE) {
-                                        selection.attachment.stageNativeApk(viewModel.fileAccess)
+                                    if (kind == ApkTargetKind.NATIVE) {
+                                        val attachment = selection.attachment.stageNativeApk(viewModel.fileAccess)
+                                        val attached = viewModel.attachmentDrafts.chooseRoute(
+                                            sessionId,
+                                            selection.attachment.containerPath,
+                                            attachment
+                                        )
+                                        if (attached) stagedApkNotice = attachment.containerPath
                                     } else {
-                                        selection.attachment.copy(apkKind = kind)
-                                    }
-                                    val attached = viewModel.attachmentDrafts.chooseRoute(
-                                        sessionId,
-                                        selection.attachment.containerPath,
-                                        attachment
-                                    )
-                                    if (attached && kind == ApkTargetKind.NATIVE) {
-                                        stagedApkNotice = attachment.containerPath
-                                    } else if (attached) {
-                                        blutterController.start(attachment.containerPath)
+                                        val attachment = selection.attachment.copy(
+                                            apkKind = ApkTargetKind.FLUTTER,
+                                            hideFromInputPreview = true
+                                        )
+                                        if (blutterController.start(attachment.containerPath, sessionId)) {
+                                            viewModel.attachmentDrafts.chooseRoute(
+                                                sessionId,
+                                                selection.attachment.containerPath,
+                                                attachment
+                                            )
+                                        } else {
+                                            Toast.makeText(context, context.getString(R.string.blutter_already_running), Toast.LENGTH_LONG).show()
+                                        }
                                     }
                                 } catch (e: kotlinx.coroutines.CancellationException) {
                                     throw e

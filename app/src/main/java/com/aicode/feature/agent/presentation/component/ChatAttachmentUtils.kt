@@ -33,6 +33,8 @@ internal data class PendingUploadAttachment(
     val image: AgentImage? = null,
     /** 用户确认的 APK 路线；未选择或非 APK 为 null。 */
     val apkKind: ApkTargetKind? = null,
+    /** Flutter 路线确认后隐藏输入区预览卡，但仍作为附件随消息发送。 */
+    val hideFromInputPreview: Boolean = false,
 )
 
 internal val PendingUploadAttachment.isImage: Boolean
@@ -83,7 +85,8 @@ internal fun AgentAttachment.toPendingAttachment(): PendingUploadAttachment {
         mimeType = mimeType,
         sizeBytes = sizeBytes,
         image = image,
-        apkKind = apkKind
+        apkKind = apkKind,
+        hideFromInputPreview = apkKind == ApkTargetKind.FLUTTER
     )
 }
 

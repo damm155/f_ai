@@ -274,7 +274,7 @@ internal fun PendingAttachmentPreviewList(
     attachments: List<PendingUploadAttachment>,
     onRemoveAttachment: (Int) -> Unit
 ) {
-    if (attachments.isEmpty()) return
+    if (attachments.none { !it.hideFromInputPreview }) return
 
     Row(
         modifier = Modifier
@@ -284,6 +284,7 @@ internal fun PendingAttachmentPreviewList(
         horizontalArrangement = Arrangement.spacedBy(Spacing.sm)
     ) {
         attachments.forEachIndexed { index, attachment ->
+            if (attachment.hideFromInputPreview) return@forEachIndexed
             PendingAttachmentPreviewItem(
                 attachment = attachment,
                 onRemove = { onRemoveAttachment(index) }

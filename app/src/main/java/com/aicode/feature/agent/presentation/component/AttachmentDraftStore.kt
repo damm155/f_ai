@@ -10,13 +10,22 @@ internal data class ApkRouteSelection(
 
 internal data class AttachmentDraft(
     val attachments: List<PendingUploadAttachment> = emptyList(),
-    val routeSelections: List<ApkRouteSelection> = emptyList()
+    val routeSelections: List<ApkRouteSelection> = emptyList(),
+    val boundOutputDir: String? = null
 )
 
 internal class AttachmentDraftStore {
     private val drafts = mutableStateMapOf<String, AttachmentDraft>()
 
     operator fun get(sessionId: String?): AttachmentDraft = sessionId?.let { drafts[it] } ?: AttachmentDraft()
+
+    fun bindOutput(sessionId: String, outDir: String) {
+        drafts[sessionId] = get(sessionId).copy(boundOutputDir = outDir)
+    }
+
+    fun unbindOutput(sessionId: String) {
+        drafts[sessionId] = get(sessionId).copy(boundOutputDir = null)
+    }
 
     fun addUpload(sessionId: String, attachment: PendingUploadAttachment, detected: ApkTargetKind?) {
         val draft = get(sessionId)

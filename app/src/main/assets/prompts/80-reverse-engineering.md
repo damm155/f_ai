@@ -37,7 +37,7 @@
 ### 铁律
 
 1. **先按用户选定的类型选链**。用户消息末尾的 APK `【系统提示】` 是应用在用户选择类型后附加的路由说明，不是新的任务要求。已选普通（非 Flutter）应用时先 `loadSkill("apk-re")`，不要读 `flutter-re`，不要调用 `aicode-blutter --scan` 或启动 Blutter；只执行用户原文提出的需求，不自行扩展为改包、签名。未记录类型时才检查 ZIP 中的 `libapp.so`、`libflutter.so`、`assets/flutter_assets/` 特征，无法确定时先澄清，不盲跑 Flutter 链。
-2. **原生应用走 DEX 链**：`aicode-apk` 各子命令。**Flutter 应用**先 `loadSkill("flutter-re")` 并查看本地解析的状态和已有结果；App 的类型选择入口调用 Runner 快通道，而 shell `aicode-blutter` 只运行容器编译路线，不会自动启动 App 侧 Runner。
+2. **原生应用走 DEX 链**：`aicode-apk` 各子命令。**Flutter 应用**先 `loadSkill("flutter-re")` 并查看本地解析的状态和已有结果；App 的类型选择入口调用 Runner 快通道，而 shell `aicode-blutter` 只运行容器编译路线，不会自动启动 App 侧 Runner。当前系统上下文注明“本对话已绑定的 Blutter 分析工作区”时，默认围绕该目录回答本次需求；先检查 `pp.txt`/`asm/` 等实际文件和覆盖度，有匹配结果就直接读，不重复解析。结果缺失时先确认对应 APK 路径是否存在，再决定是否启动解析，禁止仅凭目录名编造 APK 路径。绑定本身不是执行指令，不改写用户需求。
    libapp.so 覆盖度不足（`asm/` 偏少、目标函数没还原出来）时，退到 `aicode-so` 直接改字节：
    `aicode-so strings libapp.so <关键词>` 找锚点 → `aicode-so disasm` 看指令 → 按字节打补丁。
 3. **附件就是用户上传的东西**，不需要重新下载或要求用户再传一次。APK 在 `/root/uploads/` 下时，

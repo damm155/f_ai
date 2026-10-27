@@ -30,6 +30,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -70,7 +71,9 @@ internal fun BlutterProgressCard(
     modifier: Modifier = Modifier,
     forceCollapse: Boolean = false,
     onDismiss: () -> Unit = {},
-    onCancel: () -> Unit = {}
+    onCancel: () -> Unit = {},
+    onBindOutput: () -> Unit = {},
+    canBindOutput: Boolean = true
 ) {
     if (state.phase == BlutterPhase.IDLE) return
     // 按会话记忆展开状态，新会话默认收起（与 TodoDashboardBar 行为一致）
@@ -128,7 +131,8 @@ internal fun BlutterProgressCard(
                     }
                 ) {
                     Text(
-                        text = state.phase.label.ifBlank { stringResource(R.string.blutter_phase_ready) },
+                        text = if (state.reusedResult) stringResource(R.string.blutter_result_reused)
+                        else state.phase.label.ifBlank { stringResource(R.string.blutter_phase_ready) },
                         style = MaterialTheme.typography.labelSmall,
                         color = when {
                             state.isError -> colors.onErrorContainer
@@ -137,6 +141,12 @@ internal fun BlutterProgressCard(
                         modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                     )
                 }
+                Spacer(Modifier.width(Spacing.xs))
+                Text(
+                    text = stringResource(R.string.blutter_elapsed_seconds, state.elapsedMs / 1000),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = colors.onSurfaceVariant
+                )
                 Spacer(Modifier.width(Spacing.xs))
 
                 // 收起时显示 APK 名 · 路线 · 最近一行；展开时只留标题空间
@@ -235,6 +245,11 @@ internal fun BlutterProgressCard(
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis
                 )
+                if (state.phase == BlutterPhase.DONE) {
+                    TextButton(onClick = onBindOutput, enabled = canBindOutput) {
+                        Text(stringResource(R.string.analysis_binding_result))
+                    }
+                }
             }
         }
     }

@@ -4,7 +4,6 @@ import android.content.Context
 import com.aicode.core.util.FileLogger
 import com.aicode.feature.agent.domain.container.CommandEngine
 import com.aicode.feature.agent.domain.container.CommandEvent
-import com.aicode.feature.agent.domain.container.LinuxContainerEngine
 import com.aicode.feature.workspace.domain.WorkspacePathMapper
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
@@ -12,6 +11,8 @@ import javax.inject.Inject
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -41,6 +42,7 @@ class BlutterAnalysisController @Inject constructor(
 
     private val scope = viewModelScope
     private var job: Job? = null
+    @Volatile private var runGeneration = 0L
 
     private val _state = MutableStateFlow(BlutterUiState.idle())
     val state: StateFlow<BlutterUiState> = _state.asStateFlow()
@@ -69,24 +71,35 @@ class BlutterAnalysisController @Inject constructor(
      *
      * [apkContainerPath] 为**容器内路径**（如 ~/workspace/.aicode/attachments/x.apk）。
      */
-    fun start(apkContainerPath: String) {
-        if (_state.value.running) {
+    fun start(apkContainerPath: String, sessionId: String? = null): Boolean {
+        if (_state.value.running || job?.isActive == true) {
             FileLogger.w(TAG, "已有分析在跑，忽略本次请求: $apkContainerPath")
-            return
+            return false
         }
-        val name = apkContainerPath.substringAfterLast('/').removeSuffix(".apk")
+        val generation = ++runGeneration
+        val name = apkContainerPath.substringAfterLast('/').replace(Regex("(?i)\\.apk$"), "")
         _state.value = BlutterUiState(
             apkName = name,
             outDir = "/root/out/$name",
             phase = BlutterPhase.PREPARING,
             route = BlutterRoute.CONTAINER_BUILD,
-            running = true
+            running = true,
+            sessionId = sessionId
         )
         job = scope.launch {
+            val startedAt = System.nanoTime()
+            val ticker = launch {
+                while (isActive) {
+                    delay(1_000L)
+                    if (runGeneration == generation) {
+                        _state.value = _state.value.copy(elapsedMs = (System.nanoTime() - startedAt) / 1_000_000)
+                    }
+                }
+            }
             val lines = StringBuilder()
             var exitCode: Int? = null
             fun append(line: String) {
-                if (line.isBlank()) return
+                if (line.isBlank() || runGeneration != generation) return
                 lines.appendLine(line)
                 _state.value = _state.value.copy(log = lines.toString(), lastLine = line, phase = phaseOf(line))
             }
@@ -101,6 +114,23 @@ class BlutterAnalysisController @Inject constructor(
                             "请确认已上传附件且容器就绪。"
                     )
                     return@launch
+                }
+
+                val matchingResult = withContextIO {
+                    hasMatchingBlutterResult(hostApk, File(hostRootfs(), "root/out/$name"))
+                }
+                if (matchingResult) {
+                    _state.value = _state.value.copy(
+                        running = false,
+                        phase = BlutterPhase.DONE,
+                        reusedResult = true,
+                        resultSummary = context.getString(com.aicode.R.string.blutter_existing_result, "/root/out/$name")
+                    )
+                    return@launch
+                }
+
+                withContextIO {
+                    recordBlutterCompletion(File(hostRootfs(), "root/out/$name"), false)
                 }
 
                 // ===== 快通道：Runner So（对齐 FBox tryFastAnalyze；秒级，不联网）=====
@@ -133,8 +163,9 @@ class BlutterAnalysisController @Inject constructor(
                         if (code != null) {
                             // native 返回 0 不等于真的产出：:blutter 进程复用、目录已有产物时
                             // 会在毫秒级直接返回 0。必须用 pp.txt/asm/ 作为成功的硬证据。
-                            val produced = hasProducts(outDir)
+                            val produced = hasBlutterProducts(outDir)
                             val ok = code == 0 && produced
+                            if (ok) withContextIO { recordBlutterCompletion(outDir, true) }
                             if (code == 0 && !produced) {
                                 append("⚠ Runner 返回 0 但未产出 pp.txt/asm（耗时过短，实际未完成）")
                             }
@@ -151,7 +182,7 @@ class BlutterAnalysisController @Inject constructor(
                             return@launch
                         }
                         // 慢通道前置刹车：runner 可能已产出部分/全部产物（如误判后放弃），有则直接认领
-                        if (hasProducts(outDir)) {
+                        if (hasBlutterProducts(outDir)) {
                             _state.value = _state.value.copy(
                                 running = false,
                                 phase = BlutterPhase.DONE,
@@ -167,19 +198,12 @@ class BlutterAnalysisController @Inject constructor(
                 }
 
                 // ===== 慢通道：容器编译路线（aicode-blutter；APK 已在 /root/apk/）=====
-                val flow = when (commandEngine) {
-                    is LinuxContainerEngine ->
-                        (commandEngine as LinuxContainerEngine).runCommandStream(
-                            "aicode-blutter '/root/apk/$name.apk'",
-                            projectPath = null,
-                            timeoutMs = TIMEOUT_MS
-                        )
-                    else -> commandEngine.runCommandStream(
-                        "aicode-blutter '/root/apk/${name}.apk'",
-                        projectPath = null,
-                        timeoutMs = TIMEOUT_MS
-                    )
-                }
+                val quotedApk = "'/root/apk/${name.replace("'", "'\\''")}.apk'"
+                val flow = commandEngine.runCommandStream(
+                    "aicode-blutter $quotedApk",
+                    projectPath = null,
+                    timeoutMs = TIMEOUT_MS
+                )
                 flow.collect { ev ->
                     when (ev) {
                         is CommandEvent.Line -> {
@@ -194,7 +218,8 @@ class BlutterAnalysisController @Inject constructor(
                         is CommandEvent.Exit -> exitCode = ev.code
                     }
                 }
-                val ok = exitCode == 0
+                val ok = exitCode == 0 && withContextIO { hasBlutterProducts(File(hostRootfs(), "root/out/$name")) }
+                if (ok) withContextIO { recordBlutterCompletion(File(hostRootfs(), "root/out/$name"), true) }
                 _state.value = _state.value.copy(
                     running = false,
                     phase = if (ok) BlutterPhase.DONE else BlutterPhase.FAILED,
@@ -206,20 +231,26 @@ class BlutterAnalysisController @Inject constructor(
                             "或该 Dart 版本未被 blutter 适配（走 aicode-so 兜底链）"
                 )
             } catch (e: kotlinx.coroutines.CancellationException) {
-                _state.value = _state.value.copy(
+                if (runGeneration == generation) _state.value = _state.value.copy(
                     running = false,
                     phase = BlutterPhase.FAILED,
                     resultSummary = "分析已取消"
                 )
             } catch (e: Exception) {
                 FileLogger.e(TAG, "Blutter 分析异常", e)
-                _state.value = _state.value.copy(
+                if (runGeneration == generation) _state.value = _state.value.copy(
                     running = false,
                     phase = BlutterPhase.FAILED,
                     resultSummary = "分析异常：${e.message}"
                 )
+            } finally {
+                ticker.cancel()
+                if (runGeneration == generation) {
+                    _state.value = _state.value.copy(elapsedMs = (System.nanoTime() - startedAt) / 1_000_000)
+                }
             }
         }
+        return true
     }
 
     /**
@@ -252,7 +283,7 @@ class BlutterAnalysisController @Inject constructor(
             onLog("✗ 找不到源 APK：$apkContainerPath")
             return@withContextIO null
         }
-        runCatching { src.copyTo(dst, overwrite = true) }
+        runCatching { if (src.canonicalFile != dst.canonicalFile) src.copyTo(dst, overwrite = true) }
             .onFailure {
                 onLog("✗ APK 复制失败：${it.message}")
                 return@withContextIO null
@@ -267,22 +298,19 @@ class BlutterAnalysisController @Inject constructor(
 
     /** 取消当前分析（杀不掉 native，但能停掉轮询与流收集；浮窗显示已取消）。 */
     fun cancel() {
+        runGeneration += 1
         job?.cancel()
         job = null
-        _state.value = _state.value.copy(running = false, resultSummary = "已取消")
+        _state.value = _state.value.copy(running = false, phase = BlutterPhase.FAILED, resultSummary = "已取消")
     }
 
     /** 关闭浮窗（重置回 IDLE）。 */
     fun dismiss() {
+        runGeneration += 1
         job?.cancel()
         job = null
         _state.value = BlutterUiState.idle()
     }
-
-    /** 产物是否已存在（pp.txt 非空，或 asm/ 下已有文件）——转慢通道前的刹车判据。 */
-    private fun hasProducts(outDir: File): Boolean =
-        File(outDir, "pp.txt").let { it.isFile && it.length() > 0 } ||
-            (File(outDir, "asm").isDirectory && File(outDir, "asm").listFiles()?.isNotEmpty() == true)
 
     private fun phaseOf(line: String): BlutterPhase = when {
         line.contains("pip3 install", true) || line.contains("apt-get install", true) ||
@@ -320,7 +348,10 @@ data class BlutterUiState(
     val log: String = "",
     val lastLine: String = "",
     val exitCode: Int? = null,
-    val resultSummary: String = ""
+    val resultSummary: String = "",
+    val elapsedMs: Long = 0L,
+    val reusedResult: Boolean = false,
+    val sessionId: String? = null
 ) {
     val finished: Boolean get() = phase == BlutterPhase.DONE || phase == BlutterPhase.FAILED
     val isError: Boolean get() = phase == BlutterPhase.FAILED

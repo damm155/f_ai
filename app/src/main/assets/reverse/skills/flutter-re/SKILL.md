@@ -9,10 +9,9 @@ description: Flutter 应用逆向全流程（Dart AOT 反汇编、libapp.so 打�
 
 ## 〇、铁律（最高优先级，违反即严重错误）
 
-- **Dart 反汇编一律用 `aicode-blutter`**，它会自动选路：
-  - **快通道**：命中内置预编译 runner（App 侧 `:blutter` 进程，秒级、离线、零 token）；
-  - **慢通道**：未命中时在容器内现场编译 blutter（首次需联网拉 Dart SDK，十几分钟，属正常）。
-- **不要自己选路、不要自己判断该走哪条**。直接 `aicode-blutter <apk>`，快慢由工具决定。
+- **先读已绑定或已完成的分析结果**。当前系统上下文若已绑定 `/root/out/<目录>`，先查看其中的 `pp.txt`、`asm/`、`objs.txt`，围绕这些结果完成用户需求；存在目录不等于分析完整，需要检查文件内容与覆盖度，不要重复解析。
+- **App 与 shell 是不同入口**：用户在类型选择框选择 Flutter 后，App 先尝试内置 Runner；未命中时才使用容器编译路线。shell 的 `aicode-blutter <apk>` 只执行容器编译，不会调用 App 侧 Runner。
+- **结果不存在时才启动分析**：先确认对应原 APK 确实存在；App 正在解析时等待其完成，不并行启动第二条链。需要在容器中解析时通过 `terminal` 运行 `aicode-blutter <实际APK路径> [输出目录]`，按后台任务通知继续，不能假装已有结果。
 - **禁止手搓 blutter 工具链**：不要手动 `cmake`/`ninja` 编译 `/root/flutter-re/blutter`，不要改其 `src/*.cpp` 去「适配 SDK」。慢通道由 `aicode-blutter` 内部驱动，它已经带了必要的兼容补丁（`fbox_gcc13_fix.py` 等）。
 - **先查缓存再跑**：`/root/out/<名字>/pp.txt` 已存在就直接读结果，**严禁重跑**（重跑几分钟到十几分钟）。
 - **多步骤任务先建清单**：3 步以上先用 `todo` 工具列步骤，逐步更新，完成后清空。
@@ -39,8 +38,8 @@ description: Flutter 应用逆向全流程（Dart AOT 反汇编、libapp.so 打�
 ## 二、标准流程（按顺序执行，不要跳步）
 
 1. **侦察环境**：`ls /root/apk` 与 `ls /root/out`，确认有哪些 APK、哪些已完成分析。
-2. **判类型**：`aicode-blutter --scan <apk>` 秒级确认是 Flutter（有 `libapp.so` / `libflutter.so` / `flutter_assets`）。非 Flutter 请改用 `loadSkill("apk-re")`。
-3. **启动分析**：结果目录不存在时跑 `aicode-blutter /root/apk/<apk>`。快通道秒级返回；慢通道会打印编译进度，可耗时十几分钟，**耐心等，不要中断重试**。
+2. **判类型**：已由用户选择 Flutter 或已明确绑定其分析结果时，不重复扫描。未确定类型时用 `aicode-blutter --scan <实际APK路径>` 查看 Flutter 特征；非 Flutter 请改用 `loadSkill("apk-re")`。
+3. **结果优先**：已绑定目录或已有对应结果时直接进入第 4 步；只有结果缺失且 APK 路径已核实时才运行 `aicode-blutter <实际APK路径> [输出目录]`。该命令走容器编译路线，首次可能耗时十几分钟。
 4. **读总览**：`ls /root/out/<名字>/` 看结构，再读 `pp.txt` 头部，了解类/函数规模。
 5. **检查覆盖度（必做）**：
    ```

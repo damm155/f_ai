@@ -51,21 +51,17 @@ object ShellCommandParser {
         fun flushToken() {
             if (tokenStarted) {
                 val t = token.toString()
+                token.setLength(0)
+                tokenStarted = false
                 if (expectRedirectTarget) {
                     // 输出重定向到绝对路径可绕过 cwd 写到工作区外；但向 /dev/null 丢弃输出是常见安全惯用法，
                     // 命中任一 fd（>/dev/null、2>/dev/null、&>/dev/null）都不算高危，保持可静态判定。
                     if (t.startsWith("/") && t != "/dev/null") analyzable = false
                     expectRedirectTarget = false
-                    // 丢弃目标不进 token 列表：免得 rm 的删除目标里多出一个 /dev/null。
-                    if (t == "/dev/null") {
-                        token.setLength(0)
-                        tokenStarted = false
-                        return
-                    }
+                    // 重定向目标是路径而不是命令参数，不入 token：否则 rm 的删除目标里会多出一个文件名。
+                    return
                 }
                 current.add(t)
-                token.setLength(0)
-                tokenStarted = false
             }
         }
 

@@ -69,18 +69,22 @@ class ShellCommandParserTest {
         assertEquals(listOf("ls", "-la"), a.segments[0])
         val b = ShellCommandParser.analyze("cat a &>> log.txt")
         assertTrue(b.analyzable)
-        assertEquals(listOf("cat", "a", "log.txt"), b.segments[0])
+        assertEquals(listOf("cat", "a"), b.segments[0])
+        // &> 后仍是绝对路径时要拦下
+        assertFalse(ShellCommandParser.analyze("cat a &> /etc/x").analyzable)
     }
 
     @Test
     fun devNullRedirect_keepsProgramAtSegmentHead() {
-        // 分段后程序名仍是段首 token：白名单/记忆规则可正常命中；fd 号与丢弃目标不入 token
+        // 分段后程序名仍是段首 token：白名单/记忆规则可正常命中；fd 号与重定向目标都不入 token
         val a = ShellCommandParser.analyze("ls /usr/bin 2>/dev/null")
         assertEquals(listOf("ls", "/usr/bin"), a.segments[0])
         assertEquals("ls", ShellCommandParser.programPrefix(a.segments[0]))
         assertTrue(ShellCommandParser.matches("ls", a.segments[0]))
-        // 空格分隔的数字是普通参数，不能当成 fd 号剔除
+        // 空格分隔的数字是普通参数，不能当成 fd 号剔除；重定向目标不入 token
         assertEquals(listOf("echo", "2"), ShellCommandParser.analyze("echo 2 > out.txt").segments[0])
+        // rm 搭配重定向时，日志文件名不能被当成删除目标
+        assertEquals(listOf("rm", "-f", "x.py"), ShellCommandParser.analyze("rm -f x.py > del.log").segments[0])
     }
 
     @Test

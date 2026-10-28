@@ -58,7 +58,12 @@ MAX_CLASS_METHODS = 300 # 类方法清单上限（防混淆大类全量刷屏）
 def apk_path(name: str) -> str:
     p = name if name.startswith("/") else os.path.join(APK_DIR, name)
     if not os.path.isfile(p):
-        sys.exit("✗ APK 不存在: %s" % p)
+        # /root/apk 是首次导入 APK 的落地位置，容器是新的时它还不存在；
+        # 直接报“不存在”会让人以为是文件名写错，所以把两种情况分开说。
+        if not os.path.isdir(APK_DIR):
+            os.makedirs(APK_DIR, exist_ok=True)
+            sys.exit("✗ APK 不存在: %s（已创建 %s，请把 APK 放进该目录，或改传绝对路径）" % (p, APK_DIR))
+        sys.exit("✗ APK 不存在: %s（相对名按 %s 解析；可用 ls %s 看现有文件）" % (p, APK_DIR, APK_DIR))
     return p
 
 

@@ -52,7 +52,7 @@ class ReverseAssets @Inject constructor(
          * 资产版本。**改动 assets/reverse 下任何内容后 +1**，会触发容器内一次性自愈重解。
          * 写入 `/root/apk-tool/.version`（在 rootfs 内部，随 rootfs 重装一起消失 —— 这正是我们要的）。
          */
-        private const val ASSETS_VERSION = "rev-4"
+        private const val ASSETS_VERSION = "rev-5"
 
         /** flutter-re 自愈校验点：任一缺失即整包覆盖重解（对齐 FBox 的 hasCompleteToolchain / 补丁检查）。 */
         private val FLUTTER_RE_REQUIRED = listOf(

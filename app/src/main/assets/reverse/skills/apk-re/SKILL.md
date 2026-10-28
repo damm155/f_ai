@@ -39,6 +39,8 @@ description: 原生 APK 逆向（AndroidManifest / DEX 查改与重打包）。�
 
 路径约定：APK 放 `/root/apk/`（参数传文件名即可）；临时产物放 `/root/work/`；用户上传的附件在 `/root/uploads/`。
 
+新容器里 `/root/apk`、`/root/work` 可能还不存在：用附件上传 APK 时 App 会自动建 `/root/apk`；手动拷入前先 `mkdir -p /root/apk /root/work`。传入不存在的相对名时 `aicode-apk` 会提示按哪个目录解析。
+
 ## 二、标准流程（按顺序执行，不要跳步）
 
 1. **侦察环境**：`ls /root/apk` 确认可用 APK。

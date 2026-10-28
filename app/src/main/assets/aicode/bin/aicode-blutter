@@ -87,7 +87,12 @@ if [ "$MODE" = "status" ]; then
     echo "提示：aicode-blutter --status <目录> 看某个结果的详情"
     exit 0
   fi
-  if [ ! -d "$OUT2" ]; then echo "✗ 目录不存在: $OUT2"; exit 1; fi
+  if [ ! -d "$OUT2" ]; then
+    # 还没跑过分析时会按目录名查询，这属于“尚无结果”而不是错误，故退 0 让调用方能直接继续。
+    echo "（尚未产生分析结果：$OUT2 不存在）"
+    echo "  跑一次分析：aicode-blutter <apk路径> [输出目录]"
+    exit 0
+  fi
   echo "=== $OUT2 ==="
   for f in README.md pp.txt objs.txt frida.js; do
     [ -f "$OUT2/$f" ] && printf "  %-12s %s 字节\n" "$f" "$(stat -c%s "$OUT2/$f")"

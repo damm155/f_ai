@@ -274,15 +274,17 @@ class ToolPermissionPolicyEngine @Inject constructor(
         for (seg in segments) {
             val rmInfo = ShellCommandParser.parseRmInfo(seg)
             if (!rmInfo.isRm) continue
+            // 家目录（/root）下的明确单文件删除交给正常授权流程；递归/通配删除整段子树仍属高危。
+            val allowHomeFile = !rmInfo.isRecursive && !rmInfo.isWildcard
             for (rawPath in rmInfo.targetPaths) {
-                catastrophicReasonFor(rawPath)?.let { return it }
+                catastrophicReasonFor(rawPath, allowHomeFile)?.let { return it }
             }
         }
         return null
     }
 
     /** 单个删除目标的裁决：命中受保护范围返回对应原因，否则 null。 */
-    private fun catastrophicReasonFor(rawPath: String): String? {
+    private fun catastrophicReasonFor(rawPath: String, allowHomeFile: Boolean): String? {
         val raw = rawPath.trim()
         if (raw.isEmpty()) return null
         val path = normalizePath(raw)
@@ -294,6 +296,9 @@ class ToolPermissionPolicyEngine @Inject constructor(
             path in WORKSPACE_ROOT_TARGETS -> REASON_RM_WORKSPACE
             // 工作区子目录（构建产物等）属正常操作，置于系统目录判定之前放行
             path.startsWith("$HOME_DIR/workspace/") || path.startsWith("workspace/") -> null
+            // /root 下明确单文件删除（非递归非通配，如 rm -f /root/work/x.py）交给正常授权流程，
+            // 避免把家目录内任何删除都当作系统关键目录硬拒；递归/通配仍在上面的 HOME 分支拦截。
+            allowHomeFile && path.startsWith("$HOME_DIR/") -> null
             path == "/tmp" || path == "/tmp/*" -> REASON_RM_TMP
             PROTECTED_SYSTEM_DIRS.any { path == it || path.startsWith("$it/") } -> REASON_RM_SYSTEM_DIR
             else -> null

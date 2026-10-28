@@ -47,6 +47,40 @@ class ShellCommandParserTest {
         assertFalse(ShellCommandParser.analyze("echo hi > /etc/passwd").analyzable)
         assertFalse(ShellCommandParser.analyze("echo hi >>/sdcard/x").analyzable)
         assertTrue(ShellCommandParser.analyze("echo hi > out.txt").analyzable)
+        // 相对路径 + 丢弃 stderr，整条仍可判定
+        assertTrue(ShellCommandParser.analyze("echo hi > out.txt 2>/dev/null").analyzable)
+    }
+
+    @Test
+    fun devNullRedirect_isAnalyzable_anyFd() {
+        assertTrue(ShellCommandParser.analyze("ls /usr/bin 2>/dev/null").analyzable)
+        assertTrue(ShellCommandParser.analyze("echo hi > /dev/null").analyzable)
+        assertTrue(ShellCommandParser.analyze("echo hi &>/dev/null").analyzable)
+        // /dev/null 特例只放行丢弃输出，其它绝对路径仍不可判定
+        assertFalse(ShellCommandParser.analyze("echo hi > /etc/passwd").analyzable)
+        assertFalse(ShellCommandParser.analyze("find / -type f 2>/etc/x").analyzable)
+    }
+
+    @Test
+    fun fdCopyRedirect_doesNotSplitSegment() {
+        val a = ShellCommandParser.analyze("ls -la 2>&1")
+        assertTrue(a.analyzable)
+        assertEquals(1, a.segments.size)
+        assertEquals(listOf("ls", "-la"), a.segments[0])
+        val b = ShellCommandParser.analyze("cat a &>> log.txt")
+        assertTrue(b.analyzable)
+        assertEquals(listOf("cat", "a", "log.txt"), b.segments[0])
+    }
+
+    @Test
+    fun devNullRedirect_keepsProgramAtSegmentHead() {
+        // 分段后程序名仍是段首 token：白名单/记忆规则可正常命中；fd 号与丢弃目标不入 token
+        val a = ShellCommandParser.analyze("ls /usr/bin 2>/dev/null")
+        assertEquals(listOf("ls", "/usr/bin"), a.segments[0])
+        assertEquals("ls", ShellCommandParser.programPrefix(a.segments[0]))
+        assertTrue(ShellCommandParser.matches("ls", a.segments[0]))
+        // 空格分隔的数字是普通参数，不能当成 fd 号剔除
+        assertEquals(listOf("echo", "2"), ShellCommandParser.analyze("echo 2 > out.txt").segments[0])
     }
 
     @Test

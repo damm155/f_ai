@@ -334,8 +334,55 @@ class ToolPermissionPolicyEngineTest {
         assertTrue(denied("rm -rf ~/workspace/.."))
     }
 
-    // ── AUTO：无法静态判定的疑似破坏性命令保守拦截 ─────────────────
+    // ── 家目录下的明确单文件删除：不再算高危，交正常授权；递归/通配仍拒 ──────
 
+    @Test
+    fun homeExplicitFileRm_notDenied() = runTest {
+        assertTrue("家目录下明确单文件删除不应硬拒", !denied("rm -f /root/work/perm_scan.py"))
+        assertTrue(!denied("rm /root/tmp.txt"))
+        assertTrue(!denied("rm -f \$HOME/work/x.py"))
+    }
+
+    @Test
+    fun homeRecursiveOrWildcardRm_stillDenied() = runTest {
+        assertTrue(denied("rm -rf /root"))
+        assertTrue(denied("rm -rf /root/work"))
+        assertTrue(denied("rm -rf /root/*"))
+        assertTrue(denied("rm -f /root/work/*.py"))
+    }
+
+    @Test
+    fun homeFileRm_asksAndRememberable() = runTest {
+        val e = engine()
+        val r = e.evaluate(tool(ToolCapability.EXECUTE_COMMANDS), "Bash", bash("rm -f /root/work/x.py"), AgentMode.BUILD)
+        assertEquals(ToolPermissionPolicyEngine.Verdict.ASK, r.verdict)
+        assertEquals(listOf("rm -f /root/work/x.py"), r.rememberablePatterns)
+    }
+
+    // ── 只读命令带 2>/dev/null 不再被误拦 ──────────────────────────
+
+    @Test
+    fun devNullRedirect_safeCommandAllowed() = runTest {
+        val e = engine()
+        assertEquals(
+            ToolPermissionPolicyEngine.Verdict.ALLOW,
+            e.evaluate(tool(ToolCapability.EXECUTE_COMMANDS), "Bash", bash("ls /usr/lib 2>/dev/null"), AgentMode.BUILD).verdict
+        )
+        assertEquals(
+            ToolPermissionPolicyEngine.Verdict.ALLOW,
+            e.evaluate(tool(ToolCapability.EXECUTE_COMMANDS), "Bash", bash("cat /etc/os-release 2>&1"), AgentMode.AUTO).verdict
+        )
+    }
+
+    @Test
+    fun absoluteRedirectStillNotAllowed() = runTest {
+        val e = engine()
+        val r = e.evaluate(tool(ToolCapability.EXECUTE_COMMANDS), "Bash", bash("cat x > /etc/passwd"), AgentMode.BUILD)
+        assertEquals(ToolPermissionPolicyEngine.Verdict.ASK, r.verdict)
+        assertTrue(r.rememberablePatterns.isEmpty())
+    }
+
+    // ── AUTO：无法静态判定的疑似破坏性命令保守拦截 ─────────────────
     @Test
     fun autoMode_unanalyzableDestructive_denied() = runTest {
         val e = engine()

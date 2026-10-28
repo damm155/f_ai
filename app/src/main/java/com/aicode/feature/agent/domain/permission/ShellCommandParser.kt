@@ -52,12 +52,29 @@ object ShellCommandParser {
             if (tokenStarted) {
                 val t = token.toString()
                 if (expectRedirectTarget) {
-                    if (t.startsWith("/")) analyzable = false
+                    // 输出重定向到绝对路径可绕过 cwd 写到工作区外；但向 /dev/null 丢弃输出是常见安全惯用法，
+                    // 命中任一 fd（>/dev/null、2>/dev/null、&>/dev/null）都不算高危，保持可静态判定。
+                    if (t.startsWith("/") && t != "/dev/null") analyzable = false
                     expectRedirectTarget = false
+                    // 丢弃目标不进 token 列表：免得 rm 的删除目标里多出一个 /dev/null。
+                    if (t == "/dev/null") {
+                        token.setLength(0)
+                        tokenStarted = false
+                        return
+                    }
                 }
                 current.add(t)
                 token.setLength(0)
                 tokenStarted = false
+            }
+        }
+
+        /** 重定向算子前的纯数字是 fd 号（`2>` 的 `2`），不是命令参数。仅在数字与算子紧临时剔除（`echo 2 > out` 的 2 是参数）。 */
+        fun dropTrailingFdNumber() {
+            if (i == 0 || !command[i - 1].isDigit()) return
+            val last = current.lastOrNull()
+            if (last != null && last.isNotEmpty() && last.all { it.isDigit() }) {
+                current.removeAt(current.size - 1)
             }
         }
         fun flushSegment() {
@@ -104,10 +121,41 @@ object ShellCommandParser {
                         }
                         // 顶层段分隔符。
                         c == '\n' || c == ';' -> { flushSegment(); i++ }
-                        c == '&' -> { flushSegment(); i += if (i + 1 < n && command[i + 1] == '&') 2 else 1 }
+                        c == '&' -> {
+                            // &> / &>> 是合并输出重定向（等价 `> file 2>&1`），不是后台/逻辑与，不切段；
+                            // 目标交给重定向判定（&> /dev/null 可判定，&> /etc/x 仍判绝对路径）。
+                            if (i + 1 < n && command[i + 1] == '>') {
+                                flushToken()
+                                dropTrailingFdNumber()
+                                i += 2
+                                if (i < n && command[i] == '>') i++ // &>> 追加
+                                expectRedirectTarget = true
+                            } else {
+                                flushSegment(); i += if (i + 1 < n && command[i + 1] == '&') 2 else 1
+                            }
+                        }
                         c == '|' -> { flushSegment(); i += if (i + 1 < n && command[i + 1] == '|') 2 else 1 }
                         // 重定向：算子本身不入 token；输出重定向标记，待目标 token 判定是否绝对路径。
-                        c == '>' -> { flushToken(); i += if (i + 1 < n && command[i + 1] == '>') 2 else 1; expectRedirectTarget = true }
+                        c == '>' -> {
+                            flushToken()
+                            dropTrailingFdNumber()
+                            i += if (i + 1 < n && command[i + 1] == '>') 2 else 1
+                            // fd 复制 `2>&1`：紧随的 `&` + 数字不是文件路径，消费掉不做绝对路径判定；
+                            // 否则裸 `&` 会被当成段分隔符把命令切碎。
+                            // 但 `>& file`（bash 的 stdout+stderr 重定向）没有数字，目标仍是文件路径，照常判定。
+                            if (i < n && command[i] == '&') {
+                                var j = i + 1
+                                while (j < n && command[j].isDigit()) j++
+                                if (j > i + 1) {
+                                    i = j
+                                } else {
+                                    i++
+                                    expectRedirectTarget = true
+                                }
+                            } else {
+                                expectRedirectTarget = true
+                            }
+                        }
                         c == '<' -> { flushToken(); i++ }
                         c.isWhitespace() -> { flushToken(); i++ }
                         else -> { token.append(c); tokenStarted = true; i++ }

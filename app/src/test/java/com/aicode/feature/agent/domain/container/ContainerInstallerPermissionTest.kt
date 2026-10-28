@@ -129,8 +129,10 @@ class ContainerInstallerPermissionTest {
     fun restoreLegacyModes_按tar恢复已存在文件权限_不创建缺失条目() {
         val rootfs = File(root, "rootfs-legacy").apply { mkdirs() }
         // 旧版解压留下的错乱权限
-        val bin = File(rootfs, "usr/bin/tool").apply { parentFile.mkdirs(); writeText("bin") }
-        val conf = File(rootfs, "etc/conf").apply { parentFile.mkdirs(); writeText("c") }
+        val binDir = File(rootfs, "usr/bin").apply { mkdirs() }
+        val etcDir = File(rootfs, "etc").apply { mkdirs() }
+        val bin = File(binDir, "tool").apply { writeText("bin") }
+        val conf = File(etcDir, "conf").apply { writeText("c") }
         Files.setPosixFilePermissions(bin.toPath(), PosixFilePermissions.fromString("rwxrwxrwx"))
         Files.setPosixFilePermissions(conf.toPath(), PosixFilePermissions.fromString("rw-rw-rw-"))
 

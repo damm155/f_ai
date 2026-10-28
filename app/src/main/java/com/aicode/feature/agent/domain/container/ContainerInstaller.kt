@@ -13,6 +13,7 @@ import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
 import org.apache.commons.compress.compressors.xz.XZCompressorInputStream
 import java.io.File
 import java.io.IOException
+import java.io.InputStream
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.attribute.BasicFileAttributes
@@ -383,6 +384,8 @@ class ContainerInstaller @Inject constructor(
             configureResolvConf()
             prootTmpDir.mkdirs()
             installedMarker.writeText(INSTALL_VERSION)
+            // 新解压已按归档精确权限落盘，直接打自愈标记，跳过旧容器修补逻辑的重复遍历。
+            markPermRepairDone(rootfsDir)
             FileLogger.i(
                 TAG,
                 "容器 rootfs 安装完成：$entries 个条目，耗时 ${System.currentTimeMillis() - startedAt}ms，" +
@@ -469,6 +472,7 @@ class ContainerInstaller @Inject constructor(
         configureResolvConf(dest)
         prootTmpDirFor(profile).mkdirs()
         repairRootfsCompatibility(dest)
+        markPermRepairDone(dest)
         customInstalledMarker(profile).writeText("custom")
         FileLogger.i(TAG, "自定义容器 rootfs 安装完成：${profile.id}")
     }
@@ -480,6 +484,88 @@ class ContainerInstaller @Inject constructor(
     fun repairRootfsCompatibility(rootfs: File) {
         fixCoreutilsPermissions(rootfs)
         fixNodeGlobEntry(rootfs)
+    }
+
+    /**
+     * 旧版解压器把归档权限整体放宽（644→666 / 755→777，目录受 umask 077 变 700，硬链接
+     * fallback 复制的副本变 600），导致升级前解压的容器里 unzip/perl 等权限错乱。
+     *
+     * 修复方式：重读镜像 tar 的原始 mode，对仍存在的镜像文件/目录精确恢复 9 位权限。
+     * 幂等：rootfs 内 `.perm-repair-v1` 标记存在即跳过，失败不写标记下次重试。新解压的 rootfs
+     * 走新 [applyMode] 已是精确权限，在安装完成时直接写标记，不会重复全量修补。
+     * 只碰镜像自带文件（tar 里有条目的），用户产出（/root/out、/root/apk、~/.aicode 等）不受影响。
+     */
+    suspend fun repairLegacyRootfsPermissions(profile: ContainerProfile) = withContext(Dispatchers.IO) {
+        val rootfs = rootfsDirFor(profile)
+        if (!rootfs.isDirectory) return@withContext
+        val marker = File(rootfs, ".perm-repair-v1")
+        if (marker.isFile) return@withContext
+
+        val src: InputStream? = when (val s = profile.rootfsSource) {
+            is RootfsSource.RemoteSsh -> null
+            // 内置镜像实际解压的是 ASSET_ROOTFS（profile 里的 Asset.path 是历史遗留名），统一走 assets。
+            is RootfsSource.Asset -> context.assets.open(ASSET_ROOTFS)
+            is RootfsSource.LocalFile -> context.contentResolver.openInputStream(android.net.Uri.parse(s.uri))
+        } ?: return@withContext
+
+        val format = if ((profile.rootfsSource as? RootfsSource.LocalFile)?.uri?.let {
+                it.endsWith(".xz") || it.endsWith(".txz")
+            } == true) CompressedFormat.XZ else CompressedFormat.GZIP
+
+        val startedAt = System.currentTimeMillis()
+        try {
+            src.use { input ->
+                val decompressed = when (format) {
+                    CompressedFormat.GZIP -> GZIPInputStream(input)
+                    CompressedFormat.XZ -> XZCompressorInputStream(input)
+                }
+                decompressed.use { decompIn ->
+                    TarArchiveInputStream(decompIn).use { tarIn ->
+                        restoreLegacyModes(rootfs, tarIn)
+                    }
+                }
+            }
+            marker.writeText("v1")
+            FileLogger.i(
+                TAG,
+                "旧 rootfs 权限自愈完成（${rootfs.absolutePath}，耗时 ${System.currentTimeMillis() - startedAt}ms）"
+            )
+        } catch (e: Exception) {
+            // 失败不写标记：下次进入终端会重试；源缺失（asset/uri 打不开）也在此静默降级。
+            FileLogger.w(TAG, "旧 rootfs 权限自愈失败（可重试）: ${e.message}")
+        }
+    }
+
+    /** 逐条目把 tar mode 恢复到 rootfs 中已存在的镜像文件（internal 便于单测直接喂 tar 流）。 */
+    internal fun restoreLegacyModes(rootfs: File, tarIn: TarArchiveInputStream): Int {
+        var scanned = 0
+        var entry: TarArchiveEntry? = tarIn.nextEntry
+        while (entry != null) {
+            restoreLegacyMode(rootfs, entry)
+            scanned++
+            entry = tarIn.nextEntry
+        }
+        return scanned
+    }
+
+    /** 自愈：把 tar 条目的 9 位权限恢复到 rootfs 中对应的已存在文件/目录（symlink 无权限位、硬链接条目由其实体条目覆盖）。 */
+    private fun restoreLegacyMode(rootfs: File, entry: TarArchiveEntry) {
+        if (entry.isSymbolicLink || entry.isLink) return
+        if (entry.mode == 0) return
+        val outFile = File(rootfs, entry.name)
+        val canonicalRoot = rootfs.canonicalPath
+        if (!outFile.canonicalPath.startsWith(canonicalRoot + File.separator)) return
+        if (!outFile.exists()) return
+        runCatching {
+            Files.setPosixFilePermissions(outFile.toPath(), PosixFilePermissions.fromString(posixModeString(entry.mode)))
+        }.onFailure {
+            FileLogger.w(TAG, "自愈恢复权限失败 ${entry.name}: ${it.message}")
+        }
+    }
+
+    /** 新解压完成（权限已精确）后写自愈标记，避免旧容器修补逻辑对新 rootfs 重复全量遍历。 */
+    private fun markPermRepairDone(rootfs: File) {
+        runCatching { File(rootfs, ".perm-repair-v1").writeText("v1") }
     }
 
     private fun fixCoreutilsPermissions(rootfs: File) {
@@ -691,7 +777,10 @@ class ContainerInstaller @Inject constructor(
         }
 
         when {
-            entry.isDirectory -> outFile.mkdirs()
+            entry.isDirectory -> {
+                outFile.mkdirs()
+                applyMode(outFile, entry.mode)
+            }
 
             entry.isSymbolicLink -> {
                 outFile.parentFile?.mkdirs()
@@ -710,7 +799,11 @@ class ContainerInstaller @Inject constructor(
                     .onFailure {
                         // 退化为复制，保证文件存在
                         FileLogger.w(TAG, "hardlink 失败 ${entry.name} -> ${entry.linkName}，改为复制: ${it.message}")
-                        runCatching { target.copyTo(outFile, overwrite = true) }
+                        runCatching {
+                            target.copyTo(outFile, overwrite = true)
+                            // 复制产物也要恢复归档权限，否则硬链接分裂出的副本因 umask 变成 600
+                            applyMode(outFile, entry.mode)
+                        }
                     }
             }
 
@@ -724,15 +817,29 @@ class ContainerInstaller @Inject constructor(
         }
     }
 
-    /** 按 tar entry 的 mode 设置可执行位（owner 有 x 位则对所有人开放执行） */
+    /**
+     * 按 tar entry 的 mode 恢复 9 位权限（owner/group/other 各自的 rwx）。
+     *
+     * 少数归档的硬链接/目录条目 mode 为 0，直接据 0o000 落盘会让文件无人可读；此时保持文件
+     * 创建时的默认权限不动，宁可少改也不错改。
+     */
     private fun applyMode(file: File, mode: Int) {
-        val ownerExecutable = (mode and 0b001_000_000) != 0 // 0100
-        if (ownerExecutable) {
-            file.setExecutable(true, false)
+        if (mode == 0) return
+        runCatching {
+            Files.setPosixFilePermissions(file.toPath(), PosixFilePermissions.fromString(posixModeString(mode)))
+        }.onFailure {
+            FileLogger.w(TAG, "设置权限失败 ${file.absolutePath}: ${it.message}")
         }
-        file.setReadable(true, false)
-        // owner 写位
-        if ((mode and 0b010_000_000) != 0) file.setWritable(true, false)
+    }
+
+    /** tar 权限位（0o777 掩码）转 PosixFilePermissions 的 rwxrwxrwx 字符串，丢弃 setuid/setgid/sticky。 */
+    private fun posixModeString(mode: Int): String {
+        fun rwx(bits: Int) = buildString {
+            append(if (bits and 4 != 0) 'r' else '-')
+            append(if (bits and 2 != 0) 'w' else '-')
+            append(if (bits and 1 != 0) 'x' else '-')
+        }
+        return rwx(mode shr 6) + rwx(mode shr 3) + rwx(mode)
     }
 
     /**

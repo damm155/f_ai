@@ -538,6 +538,8 @@ class LinuxContainerEngine @Inject constructor(
         if (containerInstaller.isInstalledFor(profile)) {
             // 旧 rootfs（如已导入的 Ubuntu 26.04）不会重新解压，这里兜底巡检修复已知兼容性问题
             containerInstaller.repairRootfsCompatibility(containerInstaller.rootfsDirFor(profile))
+            // 旧版解压器放宽了归档权限（644→666 等），对已存在的一次性按 tar 原 mode 自愈（幂等，有标记即跳过）
+            containerInstaller.repairLegacyRootfsPermissions(profile)
             _initProgress.value = ContainerInitState.Ready
             refreshContainerHome()
             detectAndCacheOsIfNeeded(profile)

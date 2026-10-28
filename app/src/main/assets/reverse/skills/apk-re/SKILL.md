@@ -25,6 +25,7 @@ description: 原生 APK 逆向（AndroidManifest / DEX 查改与重打包）。�
 | Manifest 查询 | `aicode-apk info <apk>` |
 | Manifest 修改 | `aicode-apk manifest-edit <apk> debuggable=1,cleartext=1,perm=android.permission.X --out <out.apk>` |
 | DEX 搜字符串 | `aicode-apk dex-strings <apk> <正则>` |
+| 秒级侦察(会员/广告关键词，扫 libapp.so+dex) | `aicode-apk fast-scan <apk> [关键词1,关键词2]` |
 | DEX 查引用（类→方法） | `aicode-apk dex-refs <apk> <正则>` |
 | 列类的方法 | `aicode-apk dex-class <apk> <类描述符>` |
 | 反汇编方法（smali） | `aicode-apk dex-method <apk> <类描述符> <方法名>` |

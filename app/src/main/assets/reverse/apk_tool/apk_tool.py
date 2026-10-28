@@ -8,6 +8,7 @@
   info <apk>                          manifest 分析：包名/版本/权限/导出组件/标志
   manifest-edit <apk> <ops> <out>     编辑 manifest（ops 见下），产出未签名 APK
   dex-strings <apk> <regex>           搜全部 dex 字符串（正则，限 200 条）
+  fast-scan <apk> [keywords]          秒级侦察：扫 libapp.so(Flutter) 与全部 dex 字符串池，命中关键词（逗号分隔，默认会员/广告清单）
   dex-refs <apk> <regex>              搜 const-string 代码引用：谁在哪个方法加载了它
   dex-class <apk> <class>             列类的方法清单（class=Lcom/a/B; 格式）
   dex-fields <apk> <class>            列类的字段清单（static/instance、Java 类型、访问标志）
@@ -42,6 +43,14 @@ from reapk.dex import field_acc_str, _desc_to_java  # noqa: E402
 
 APK_DIR = "/root/apk"
 MAX_HITS = 200          # 字符串/引用搜索上限，防大 dex 刷屏
+MAX_KW_HITS = 8         # fast-scan 单关键词最大命中记数（对齐 FBox）
+CONTEXT_BEFORE = 14     # fast-scan 命中上下文前置字节
+CONTEXT_AFTER = 26      # fast-scan 命中上下文后置字节
+# fast-scan 默认关键词清单（逗号分隔、大小写不敏感，子串匹配，对齐 FBox）
+DEFAULT_FAST_SCAN_KEYWORDS = (
+    "vip,member,premium,subscription,entitlement,unlock,paid,advert,admob,"
+    "showad,show_ad,loadad,load_ad,banner,interstitial,reward,pangle,穿山甲,优量汇"
+)
 MAX_SMALI_LINES = 400   # 反汇编单页输出上限（可用 offset/limit 分页）
 MAX_CLASS_METHODS = 300 # 类方法清单上限（防混淆大类全量刷屏）
 
@@ -141,6 +150,116 @@ def cmd_dex_strings(args):
           % (total, "，仅显示前 %d" % MAX_HITS if total > MAX_HITS else "", pat))
     print("\n".join(hits))
     print("提示: 命中后用 dex-refs 确认代码引用位置，再 dex-method 反汇编上下文。")
+
+
+def _scan_blob_lower(blob_lower, kw_lower):
+    """返回关键词在(已转小写)的字节块中的命中偏移列表，最多 MAX_KW_HITS 个。"""
+    pos = []
+    start = 0
+    while len(pos) < MAX_KW_HITS:
+        i = blob_lower.find(kw_lower, start)
+        if i < 0:
+            break
+        pos.append(i)
+        start = i + max(1, len(kw_lower))
+    return pos
+
+
+def _print_context(blob, off, kw_len):
+    lo = max(0, off - CONTEXT_BEFORE)
+    hi = off + kw_len + CONTEXT_AFTER
+    ctx = blob[lo:hi]
+    ctx_s = "".join(chr(b) if 32 <= b < 127 else "." for b in ctx)
+    prefix_off = off - lo
+    print("    @0x%X  …%s…" % (off, ctx_s))
+    return prefix_off, ctx_s
+
+
+def cmd_fast_scan(args):
+    """秒级侦察：在 libapp.so(Flutter) 与全部 dex 字符串池中搜会员/广告等关键词。
+
+    与 FBox fast_scan_apk 对齐：逗号分隔关键词、大小写不敏感子串匹配、未命中提示
+    逻辑可能在服务端。一个命令覆盖 Flutter(libapp.so) 与原生(全部 classes.dex) 两类目标。
+    """
+    p = apk_path(args[0])
+    kws_text = args[1] if len(args) > 1 and args[1].strip() else DEFAULT_FAST_SCAN_KEYWORDS
+    kws = [k.strip() for k in kws_text.split(",") if k.strip()]
+    if not kws:
+        sys.exit("✗ 关键词为空：%r" % kws_text)
+
+    # 汇总命中：{kw: [(来源, 偏移/字符串), ...]}
+    results = {}
+    sources = []  # [(label, size_mb)] 供汇总行
+
+    # 来源 1：Flutter libapp.so（zipfile 直读，不依赖 unzip）
+    try:
+        with zipfile.ZipFile(p) as zf:
+            names = set(zf.namelist())
+            so_name = "lib/arm64-v8a/libapp.so"
+            if so_name in names:
+                blob = zf.read(so_name)
+                blob_lower = blob.lower()
+                sources.append(("libapp.so", len(blob) / 1048576.0))
+                for kw in kws:
+                    kwb = kw.lower().encode("utf-8", "ignore")
+                    if not kwb:
+                        continue
+                    pos = _scan_blob_lower(blob_lower, kwb)
+                    if pos:
+                        results.setdefault(kw, []).extend(
+                            ("libapp.so", off, blob, len(kwb)) for off in pos)
+    except (zipfile.BadZipFile, KeyError, OSError) as e:
+        sys.exit("✗ 无法读取 APK(%s): %s" % (p, e))
+
+    # 来源 2：全部 classes*.dex 字符串池（原生目标，容错：解析失败不影响 libapp 命中）
+    try:
+        with zipfile.ZipFile(p) as zf:
+            dex_names = sorted(x for x in zf.namelist()
+                               if re.fullmatch(r"classes\d*\.dex", x))
+        if dex_names:
+            dex_total_bytes = 0
+            for name, dex in load_dexes(p):
+                dex_total_bytes += len(dex.d)
+                for kw in kws:
+                    kwl = kw.lower()
+                    cnt = 0
+                    for s in dex.all_strings():
+                        if not s:
+                            continue
+                        if kwl in s.lower():
+                            cnt += 1
+                            if cnt <= MAX_KW_HITS:
+                                results.setdefault(kw, []).append(
+                                    (name, s, None, len(kw)))
+            if dex_total_bytes:
+                sources.append(("%d 个 dex 字符串池" % len(dex_names),
+                                dex_total_bytes / 1048576.0))
+    except Exception as e:  # 畸形 dex 之类的非致命问题，仅告警，不丢 libapp 结果
+        sys.stderr.write("⚠ dex 字符串扫描跳过: %s\n" % e)
+
+    if not sources:
+        sys.exit("✗ %s 不是合法 APK（缺少 libapp.so 也无 classes*.dex）" % p)
+
+    total = sum(len(v) for v in results.values())
+    print("🔍 快速扫描完成：%s，关键词 %d 个，命中 %d 处"
+          % (", ".join(lbl for lbl, _ in sources), len(kws), total))
+    if not results:
+        print("未命中任何关键词。可能原因：")
+        print("  1) 会员/广告逻辑在服务端（客户端无相关字符串），全量分析大概率也无法解锁，建议告知用户改走服务端/请求校验路线")
+        print("  2) 字符串被混淆/加密（少见，Flutter Dart 字符串通常明文保留）")
+        print("  3) 关键词不匹配目标 App 的命名，可传自定义 keywords 重试（如 isVip、hasAd 等）")
+    else:
+        for kw in kws:
+            hits = results.get(kw)
+            if not hits:
+                continue
+            print("  [%s] %d 处" % (kw, len(hits)))
+            for src, loc, blob, kwlen in hits[:4]:
+                if blob is not None:
+                    _print_context(blob, loc, kwlen)
+                else:
+                    print("    %s 字符串: %r" % (src, loc))
+        print("提示：确认目标在客户端后，再做全量分析；对原生用 dex-refs 定位代码引用，对 Flutter 用上述字符串在 pp.txt 反查函数名，可快速定位。")
 
 
 def cmd_dex_refs(args):
@@ -585,6 +704,7 @@ COMMANDS = {
     "info": (cmd_info, 1, "<apk>"),
     "manifest-edit": (cmd_manifest_edit, 3, "<apk> <ops> <out.apk>"),
     "dex-strings": (cmd_dex_strings, 2, "<apk> <regex>"),
+    "fast-scan": (cmd_fast_scan, 1, "<apk> [keywords]"),
     "dex-refs": (cmd_dex_refs, 2, "<apk> <regex>"),
     "dex-class": (cmd_dex_class, 2, "<apk> <class>"),
     "dex-fields": (cmd_dex_fields, 2, "<apk> <class>"),

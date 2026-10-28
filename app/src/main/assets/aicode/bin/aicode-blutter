@@ -10,7 +10,8 @@
 #   aicode-blutter <apk路径> [输出目录]        完整分析（慢：首次某 Dart 版本要联网拉 Dart SDK）
 #   aicode-blutter --scan <apk路径>            秒级特征侦察（不解压、不编译：查 libapp.so/libflutter.so/
 #                                              flutter_assets/dex 数量 + arm64 缺失提醒 + ELF 魔数校验）
-#                                              对应 FBox fast_scan_apk，分析前必做
+#                                              仅判定 Flutter 类型与工具链可用性；会员/广告关键词侦察用
+#                                              aicode-apk fast-scan（对应 FBox fast_scan_apk）
 #   aicode-blutter --status [输出目录]          查看分析进度/是否已有结果（对应 FBox analysis_status）
 #   aicode-blutter --search <目录|out> <正则>   全文搜特征串/函数名（pp.txt + asm/），对应 FBox search_flutter
 #   aicode-blutter --read <文件> [行数]         精读结果文件片段（默认 4000 字符上限），对应 read_flutter_result

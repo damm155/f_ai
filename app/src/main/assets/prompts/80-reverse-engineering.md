@@ -11,6 +11,7 @@
 |---|---|---|
 | AndroidManifest 查看/修改 | `aicode-apk info <apk>` / `aicode-apk manifest-edit …` | apk_manifest |
 | DEX 字符串 / 代码引用搜索 | `aicode-apk dex-strings <apk> <正则>` / `aicode-apk dex-refs …` | apk_dex_search |
+| **秒级会员/广告关键词侦察** | `aicode-apk fast-scan <apk> [关键词,逗号分隔]`（扫 libapp.so + 全部 dex 字符串池，未命中提示逻辑可能在服务端） | fast_scan_apk |
 | DEX 反汇编 / 类字段 | `aicode-apk dex-class` / `dex-method` / `dex-fields` | apk_dex_inspect / apk_dex_fields |
 | DEX 打补丁 | `aicode-apk dex-return`（强返）/ `dex-smali`（重写）/ `dex-string-edit` | apk_dex_patch |
 | 重打包 | `aicode-apk rebuild <apk> <out.apk>` | repack_apk |

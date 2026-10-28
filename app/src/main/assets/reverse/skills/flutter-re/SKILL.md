@@ -20,7 +20,7 @@ description: Flutter 应用逆向全流程（Dart AOT 反汇编、libapp.so 打�
 
 | 用途 | 命令 |
 |---|---|
-| 秒级侦察（分析前必做） | `aicode-blutter --scan <apk>` |
+| 秒级侦察（分析前必做） | `aicode-apk fast-scan <apk> [关键词]`（扫 libapp.so 会员/广告关键词；`aicode-blutter --scan <apk>` 仅指 Flutter 类型判定） |
 | 跑分析与反汇编 | `aicode-blutter <apk> [输出目录]` |
 | 查分析状态 / 缓存 | `aicode-blutter --status <名字或out目录>` |
 | 全文搜特征串/函数名 | `aicode-blutter --search <out目录> <正则>` |

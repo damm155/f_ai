@@ -294,7 +294,7 @@ x86 侧没有 Debian 镜像，因此：
 
 ### 10.1 完整缺口核对结论
 
-FBox 共 **38 个 AI 工具**，逐项对照 AiCode 后，容器工具链层**零缺失**（`aicode-apk` 13 子命令、
+FBox 共 **38 个 AI 工具**，逐项对照 AiCode 后，容器工具链层**零缺失**（`aicode-apk` 14 子命令、
 `aicode-so` 6 子命令 = FBox 全量子命令集，且用的是同一份 `apk_tool.py`/`so_tool.py`）。
 缺的全在 **App 侧工具/UI 层**：
 
@@ -305,7 +305,7 @@ FBox 共 **38 个 AI 工具**，逐项对照 AiCode 后，容器工具链层**�
 | 3 | `patch_so` | ❌ `aicode-so` 只读 | ⏳ 未做 |
 | 4 | Blutter Runner 快通道（18 so + 服务） | ❌ 无 | ⏳ 未做 |
 | 5 | 补丁柜 5 件套 | ❌ 无（`CheckpointManager` 是会话文件检查点，非补丁柜） | ⏳ 未做 |
-| 6 | `fast_scan_apk` / `analysis_status` / `search_flutter` / `read_flutter_result` | ❌ 无 | ⏳ 建议并入 wrapper（`--scan`/`--status`）+ 提示词引导用 grep/readFile |
+| 6 | `fast_scan_apk` / `analysis_status` / `search_flutter` / `read_flutter_result` | ❌ 无 | fast_scan_apk ✅ 已补（`fast-scan`），其余 ⏳ |
 | 7 | `reflutter` 链 | ⚠️ 资产已放、未接线 | ⏳ 未做 |
 | 8 | `query_experience` / `save_experience` | ⚠️ `/root/knowledge` 已持久绑定、未接线 | ⏳ 未做 |
 | 9 | `ocr_image` | ⚠️ 仅 `viewImage`（给模型看图，非离线取字） | ⏳ 未做 |

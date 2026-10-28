@@ -7,6 +7,7 @@
 #   aicode-apk manifest-edit <apk> debuggable=1,cleartext=1,perm=android.permission.X --out <out.apk>
 #                                                              ← apk_manifest(edit)
 #   aicode-apk dex-strings   <apk> <正则>                       ← apk_dex_search(strings)
+#   aicode-apk fast-scan     <apk> [关键词,逗号分隔]           ← fast_scan_apk（扫 libapp.so+lib DEX 字符串）
 #   aicode-apk dex-refs      <apk> <正则>                       ← apk_dex_search(refs)
 #   aicode-apk dex-class     <apk> <类描述符>                    ← apk_dex_inspect(class)
 #   aicode-apk dex-method    <apk> <类描述符> <方法名>            ← apk_dex_inspect(method)

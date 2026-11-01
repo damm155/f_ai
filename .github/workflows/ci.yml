@@ -61,9 +61,6 @@ jobs:
           # PR 用只读缓存，仅 main 的 push 写回缓存，避免被 PR 污染。
           cache-read-only: ${{ github.ref != 'refs/heads/main' }}
 
-      - name: Grant execute permission for gradlew
-        run: chmod +x ./gradlew
-
       - name: Set up reverse tool test dependencies
         run: |
           python3 -m pip install capstone==5.0.7 pyelftools==0.32
@@ -84,7 +81,7 @@ jobs:
       # 只跑 universal debug 变体：单测逻辑与 flavor 无关（flavor 仅影响 abiFilters/assets），
       # 跑全 flavor 6 变体是重复编译，无额外覆盖。
       - name: Run unit tests
-        run: ./gradlew :app:testUniversalDebugUnitTest --stacktrace
+        run: bash ./gradlew :app:testUniversalDebugUnitTest --stacktrace
 
       - name: Configure release signing when secrets are available
         env:
@@ -108,7 +105,7 @@ jobs:
           fi
 
       - name: Build universal release
-        run: ./gradlew :app:assembleUniversalRelease --stacktrace
+        run: bash ./gradlew :app:assembleUniversalRelease --stacktrace
 
       - name: Validate release APK
         run: |

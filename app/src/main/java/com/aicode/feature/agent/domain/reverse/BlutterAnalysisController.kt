@@ -1,11 +1,13 @@
 package com.aicode.feature.agent.domain.reverse
 
 import android.content.Context
+import com.aicode.R
 import com.aicode.core.util.FileLogger
 import com.aicode.feature.agent.domain.container.CommandEngine
 import com.aicode.feature.agent.domain.container.CommandEvent
 import com.aicode.feature.agent.domain.container.LinuxContainerEngine
 import com.aicode.feature.workspace.domain.WorkspacePathMapper
+import com.aicode.feature.agent.domain.tool.explorer.shellQuote
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
 import javax.inject.Inject
@@ -45,12 +47,12 @@ class BlutterAnalysisController @Inject constructor(
     private val _state = MutableStateFlow(BlutterUiState.idle())
     val state: StateFlow<BlutterUiState> = _state.asStateFlow()
 
-    /** 宿主 rootfs 根（容器内 / 的实体；容器 /root 即其 root/ 子目录）。 */
-    private fun hostRootfs(): File = File(context.filesDir, "rootfs")
-
-
     private suspend fun <T> withContextIO(block: () -> T): T =
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { block() }
+
+    private suspend fun cleanupStage(directory: File) = kotlinx.coroutines.withContext(
+        kotlinx.coroutines.NonCancellable + kotlinx.coroutines.Dispatchers.IO
+    ) { directory.deleteRecursively() }
 
     /**
      * 把容器内路径还原为**宿主真实路径**（App 侧 File 直接可读）。
@@ -103,62 +105,82 @@ class BlutterAnalysisController @Inject constructor(
                     return@launch
                 }
 
+                val outDir = pathMapper.toHostFile("/root/out/$name")
+                if (withContextIO { BlutterAnalysisProducts.isReusable(outDir, hostApk) }) {
+                    _state.value = _state.value.copy(
+                        running = false,
+                        phase = BlutterPhase.DONE,
+                        exitCode = 0,
+                        resultSummary = context.getString(R.string.blutter_cached_result_summary, name)
+                    )
+                    return@launch
+                }
+                withContextIO {
+                    listOf(BlutterAnalysisProducts.COMPLETED_MARKER, ".analyzed_meta").forEach { marker ->
+                        File(outDir, marker).delete()
+                    }
+                }
+
                 // ===== 快通道：Runner So（对齐 FBox tryFastAnalyze；秒级，不联网）=====
                 if (runnerExecutor.isAvailable()) {
                     _state.value = _state.value.copy(route = BlutterRoute.RUNNER_SO)
                     append("〔快通道〕解 APK 抽取 libapp.so / libflutter.so…")
-                    val extracted = withContextIO {
-                        runnerExecutor.extractFlutterLibs(hostApk, File(hostRootfs(), "root/out/$name"))
+                    val stageDir = File(outDir.parentFile, ".${outDir.name}.runner-${System.nanoTime()}")
+                    val extracted = try {
+                        withContextIO {
+                            stageDir.deleteRecursively()
+                            runnerExecutor.extractFlutterLibs(hostApk, stageDir)
+                        }
+                    } catch (error: Throwable) {
+                        cleanupStage(stageDir)
+                        throw error
                     }
                     if (extracted == null) {
+                        cleanupStage(stageDir)
                         append("⚠ Flutter so 提取失败，转容器编译路线")
                     } else {
                         val (libappDir, libapp, libflutter) = extracted
                         append("✓ libapp.so ${"%.1f".format(libapp.length() / 1048576f)}MB 已就位")
-                        val outDir = File(hostRootfs(), "root/out/$name")
-                        outDir.mkdirs()
-                        // 清掉上一次分析残留的产物：否则「重跑同一个应用」时，
-                        // hasProducts 会拿旧 pp.txt 当本次结果，把失败误报成成功。
-                        listOf("pp.txt", "objs.txt", "asm", "runner.log").forEach { n ->
-                            runCatching { File(outDir, n).deleteRecursively() }
+                        val code = try {
+                            runnerExecutor.execute(
+                                apkName = name,
+                                libappDir = libappDir,
+                                libappFile = libapp,
+                                libflutterFile = libflutter,
+                                outDir = stageDir,
+                                onLog = ::append
+                            )
+                        } catch (error: Throwable) {
+                            cleanupStage(stageDir)
+                            throw error
                         }
-                        val code = runnerExecutor.execute(
-                            apkName = name,
-                            libappDir = libappDir,
-                            libappFile = libapp,
-                            libflutterFile = libflutter,
-                            outDir = outDir,
-                            onLog = ::append
-                        )
                         if (code != null) {
-                            // native 返回 0 不等于真的产出：:blutter 进程复用、目录已有产物时
-                            // 会在毫秒级直接返回 0。必须用 pp.txt/asm/ 作为成功的硬证据。
-                            val produced = hasProducts(outDir)
-                            val ok = code == 0 && produced
-                            if (code == 0 && !produced) {
-                                append("⚠ Runner 返回 0 但未产出 pp.txt/asm（耗时过短，实际未完成）")
-                            }
-                            _state.value = _state.value.copy(
-                                running = false,
-                                phase = if (ok) BlutterPhase.DONE else BlutterPhase.FAILED,
-                                exitCode = code,
-                                resultSummary = when {
-                                    ok -> "Runner 分析完成：/root/out/$name/（pp.txt / asm/ / objs.txt）"
-                                    code == 0 -> "Runner 未产出结果（exit 0 但无 pp.txt/asm），可重试或走容器编译路线"
-                                    else -> "Runner 退出码 $code（已记录黑名单，可回退容器编译路线）"
+                            try {
+                                val produced = withContextIO { BlutterAnalysisProducts.hasProducts(stageDir) }
+                                val ok = code == 0 && produced
+                                if (ok) withContextIO {
+                                    BlutterAnalysisProducts.markCompleted(stageDir)
+                                    BlutterAnalysisProducts.publish(stageDir, outDir)
                                 }
-                            )
-                            return@launch
+                                if (code == 0 && !produced) {
+                                    append("⚠ Runner 返回 0 但未产出完整结果（实际未完成）")
+                                }
+                                _state.value = _state.value.copy(
+                                    running = false,
+                                    phase = if (ok) BlutterPhase.DONE else BlutterPhase.FAILED,
+                                    exitCode = code,
+                                    resultSummary = when {
+                                        ok -> "Runner 分析完成：/root/out/$name/（pp.txt / asm/ / objs.txt）"
+                                        code == 0 -> "Runner 未产出完整结果，可重试或走容器编译路线"
+                                        else -> "Runner 退出码 $code（已记录黑名单，可回退容器编译路线）"
+                                    }
+                                )
+                                return@launch
+                            } finally {
+                                cleanupStage(stageDir)
+                            }
                         }
-                        // 慢通道前置刹车：runner 可能已产出部分/全部产物（如误判后放弃），有则直接认领
-                        if (hasProducts(outDir)) {
-                            _state.value = _state.value.copy(
-                                running = false,
-                                phase = BlutterPhase.DONE,
-                                resultSummary = "Runner 已产出结果（进程放弃前完成）：/root/out/$name/（pp.txt / asm/ / objs.txt）"
-                            )
-                            return@launch
-                        }
+                        cleanupStage(stageDir)
                         append("〔快通道未走通〕转容器编译路线（较慢，首次需联网拉 Dart SDK）")
                         _state.value = _state.value.copy(route = BlutterRoute.CONTAINER_BUILD)
                     }
@@ -167,15 +189,16 @@ class BlutterAnalysisController @Inject constructor(
                 }
 
                 // ===== 慢通道：容器编译路线（aicode-blutter；APK 已在 /root/apk/）=====
+                val command = "aicode-blutter ${shellQuote("/root/apk/$name.apk")}"
                 val flow = when (commandEngine) {
                     is LinuxContainerEngine ->
                         (commandEngine as LinuxContainerEngine).runCommandStream(
-                            "aicode-blutter '/root/apk/$name.apk'",
+                            command,
                             projectPath = null,
                             timeoutMs = TIMEOUT_MS
                         )
                     else -> commandEngine.runCommandStream(
-                        "aicode-blutter '/root/apk/${name}.apk'",
+                        command,
                         projectPath = null,
                         timeoutMs = TIMEOUT_MS
                     )
@@ -194,13 +217,17 @@ class BlutterAnalysisController @Inject constructor(
                         is CommandEvent.Exit -> exitCode = ev.code
                     }
                 }
-                val ok = exitCode == 0
+                val produced = withContextIO { BlutterAnalysisProducts.hasProducts(outDir) }
+                val ok = exitCode == 0 && produced
+                if (ok) withContextIO { BlutterAnalysisProducts.markCompleted(outDir) }
                 _state.value = _state.value.copy(
                     running = false,
                     phase = if (ok) BlutterPhase.DONE else BlutterPhase.FAILED,
                     exitCode = exitCode,
                     resultSummary = if (ok)
                         "Blutter 分析完成：/root/out/$name/（pp.txt / asm/ / objs.txt）"
+                    else if (exitCode == 0)
+                        context.getString(R.string.blutter_incomplete_result_summary)
                     else
                         "Blutter 分析失败（exit=$exitCode）。常见原因：首次分析需联网拉 Dart SDK 失败；" +
                             "或该 Dart 版本未被 blutter 适配（走 aicode-so 兜底链）"
@@ -225,10 +252,7 @@ class BlutterAnalysisController @Inject constructor(
     /**
      * 把 APK 从附件目录复制到 /root/apk/<name>.apk（宿主两侧直拷）。
      *
-     * 源路径解析顺序：
-     * 1. [WorkspacePathMapper.toHostFile]（挂载表：workspace/.aicode → 宿主项目目录）；
-     * 2. `~/` 前缀手工展开（mapper 不可用时的兜底，容错旧调用）；
-     * 3. 已是宿主路径则直接用。
+     * 源文件与目标均经 [WorkspacePathMapper.toHostFile] 解析，保持当前容器与附件挂载一致。
      * 成功后校验目标文件存在且非空，把失败暴露在 PREPARING 阶段而不是留给后续通道报「找不到」。
      */
     private suspend fun stageApk(
@@ -236,23 +260,18 @@ class BlutterAnalysisController @Inject constructor(
         name: String,
         onLog: (String) -> Unit
     ): File? = withContextIO {
-        val dst = File(hostRootfs(), "root/apk/$name.apk").apply {
+        val dst = pathMapper.toHostFile("/root/apk/$name.apk").apply {
             parentFile?.mkdirs()
         }
-        val src: File? = sequence {
-            yield(runCatching { pathMapper.toHostFile(apkContainerPath) }.getOrNull())
-            val expanded = apkContainerPath
-                .replaceFirst("^~/?".toRegex(), hostRootfs().absolutePath + "/root/")
-            yield(if (File(expanded).isFile) File(expanded) else null)
-            val asHost = File(apkContainerPath)
-            yield(if (asHost.isFile) asHost else null)
-        }.filterNotNull().firstOrNull { it.isFile }
+        val src = hostFileOf(apkContainerPath)?.takeIf { it.isFile }
 
         if (src == null) {
             onLog("✗ 找不到源 APK：$apkContainerPath")
             return@withContextIO null
         }
-        runCatching { src.copyTo(dst, overwrite = true) }
+        runCatching {
+            if (src.canonicalFile != dst.canonicalFile) src.copyTo(dst, overwrite = true)
+        }
             .onFailure {
                 onLog("✗ APK 复制失败：${it.message}")
                 return@withContextIO null
@@ -278,11 +297,6 @@ class BlutterAnalysisController @Inject constructor(
         job = null
         _state.value = BlutterUiState.idle()
     }
-
-    /** 产物是否已存在（pp.txt 非空，或 asm/ 下已有文件）——转慢通道前的刹车判据。 */
-    private fun hasProducts(outDir: File): Boolean =
-        File(outDir, "pp.txt").let { it.isFile && it.length() > 0 } ||
-            (File(outDir, "asm").isDirectory && File(outDir, "asm").listFiles()?.isNotEmpty() == true)
 
     private fun phaseOf(line: String): BlutterPhase = when {
         line.contains("pip3 install", true) || line.contains("apt-get install", true) ||

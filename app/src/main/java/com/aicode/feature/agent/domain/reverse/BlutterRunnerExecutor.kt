@@ -84,7 +84,7 @@ class BlutterRunnerExecutor @Inject constructor(
             java.io.RandomAccessFile(libapp, "r").use { raf ->
                 while (filePos < scanLen) {
                     raf.seek(filePos)
-                    val n = raf.read(buf)
+                    val n = raf.read(buf, 0, minOf(buf.size, (scanLen - filePos).toInt()))
                     if (n < 4) break
                     var i = 0
                     while (i <= n - 4) {
@@ -106,7 +106,8 @@ class BlutterRunnerExecutor @Inject constructor(
                         }
                         i++
                     }
-                    filePos += n - 64 // 重叠 64 字节
+                    if (filePos + n >= scanLen) break
+                    filePos += maxOf(n - 64, 1)
                 }
             }
         }.onFailure { FileLogger.w(TAG, "提取 snapshot hash 失败", it) }
@@ -282,12 +283,11 @@ class BlutterRunnerExecutor @Inject constructor(
             val want = listOf("lib/arm64-v8a/libapp.so", "lib/arm64-v8a/libflutter.so")
             ZipFile(apkFile).use { z ->
                 for (name in want) {
-                    val e = z.getEntry(name) ?: continue
+                    val e = z.getEntry(name) ?: return null
                     val out = File(baseDir, name)
                     out.parentFile?.mkdirs()
-                    if (!out.isFile || out.length() != e.size) {
-                        z.getInputStream(e).use { ins -> out.outputStream().use { ins.copyTo(it) } }
-                    }
+                    z.getInputStream(e).use { ins -> out.outputStream().use { ins.copyTo(it) } }
+                    if (out.length() != e.size || out.length() == 0L) return null
                 }
             }
             val libapp = File(dest, "libapp.so")

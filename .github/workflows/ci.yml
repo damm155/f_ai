@@ -4,8 +4,9 @@ name: CI
 # 目的是合入前的兜底门禁，避免编译错误/回归推迟到打 tag 发版当天才暴露。
 # 打 v* tag 的发版构建走 android-release.yml，不在这里。
 on:
+  workflow_dispatch:
   push:
-    branches: [ main ]
+    branches: [ main, 'fix/**' ]
     # 纯文档/资源改动不影响构建产物，跳过 CI 省时间（public 仓库虽不扣额度，但省 11 分钟等待）。
     # 注意：只要本次 push 含任一非忽略路径的改动，CI 仍会触发。
     paths-ignore:
@@ -28,6 +29,9 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   build:
     name: Build & Test
@@ -47,6 +51,11 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools platforms;android-36 build-tools;35.0.0'
+
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
@@ -55,6 +64,17 @@ jobs:
 
       - name: Grant execute permission for gradlew
         run: chmod +x ./gradlew
+
+      - name: Set up reverse tool test dependencies
+        run: |
+          python3 -m pip install capstone==5.0.7 pyelftools==0.32
+          sudo apt-get update
+          sudo apt-get install -y binutils-aarch64-linux-gnu
+
+      - name: Run reverse tool regression tests
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: python3 -m unittest discover -s scripts/tests -v
 
       # 迁移版本号对账：编号连续、SCHEMA_VERSION 一致、已发布迁移未被篡改/复用
       # （hotfix 合流后 main 未把未发布迁移后移会在这里被拦）。
@@ -70,4 +90,21 @@ jobs:
       # 只跑 universal debug 变体：单测逻辑与 flavor 无关（flavor 仅影响 abiFilters/assets），
       # 跑全 flavor 6 变体是重复编译，无额外覆盖。
       - name: Run unit tests
-        run: ./gradlew :app:testUniversalDebugUnitTest
+        run: ./gradlew :app:testUniversalDebugUnitTest --stacktrace
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: reverse-tools-debug-${{ github.sha }}
+          path: app/build/outputs/apk/universal/debug/*.apk
+          if-no-files-found: error
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reverse-tools-tests-${{ github.sha }}
+          path: |
+            app/build/reports/tests/testUniversalDebugUnitTest/
+            app/build/test-results/testUniversalDebugUnitTest/
+          if-no-files-found: ignore

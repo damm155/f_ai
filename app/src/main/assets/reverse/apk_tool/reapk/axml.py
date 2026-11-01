@@ -187,7 +187,8 @@ class Arsc:
             vdata = struct.unpack_from("<I", data, vp + 4)[0]
             rid = (pkg_id << 24) | (type_id << 16) | idx
             self.values.setdefault(rid, (vtype, vdata))
-            entry_name = key_strings[idx] if idx < len(key_strings) else ""
+            key_idx = struct.unpack_from("<I", data, ep + 4)[0]
+            entry_name = key_strings[key_idx] if key_idx < len(key_strings) else ""
             if entry_name:
                 self.names.setdefault(rid, "%s/%s" % (type_name, entry_name))
             self.type_names.setdefault(rid, type_name)
@@ -431,21 +432,21 @@ def _set_attr(start_ev, name, resid, vtype, vdata=0, vstr=None):
     start_ev[4].append({"ns": ANDROID_NS, "name": name, "resid": resid,
                         "vtype": vtype, "vstr": vstr, "vdata": vdata})
 
-def patch_debuggable(ir):
+def patch_debuggable(ir, value=True):
     app = _app_start(ir)
     if not app:
         raise AxmlError("no <application> element")
     _ensure_resid(ir, "debuggable", RID_DEBUGGABLE)
-    _set_attr(app, "debuggable", RID_DEBUGGABLE, T_INT_BOOL, 0xFFFFFFFF)
+    _set_attr(app, "debuggable", RID_DEBUGGABLE, T_INT_BOOL, 0xFFFFFFFF if value else 0)
 
 RID_CLEARTEXT = 0x01010604
 
-def patch_cleartext(ir):
+def patch_cleartext(ir, value=True):
     app = _app_start(ir)
     if not app:
         raise AxmlError("no <application> element")
     _ensure_resid(ir, "usesCleartextTraffic", RID_CLEARTEXT)
-    _set_attr(app, "usesCleartextTraffic", RID_CLEARTEXT, T_INT_BOOL, 0xFFFFFFFF)
+    _set_attr(app, "usesCleartextTraffic", RID_CLEARTEXT, T_INT_BOOL, 0xFFFFFFFF if value else 0)
 
 def patch_add_permission(ir, perm):
     _ensure_resid(ir, "name", RID_NAME)

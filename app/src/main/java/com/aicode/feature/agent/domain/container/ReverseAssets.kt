@@ -52,9 +52,9 @@ class ReverseAssets @Inject constructor(
          * 资产版本。**改动 assets/reverse 下任何内容后 +1**，会触发容器内一次性自愈重解。
          * 写入 `/root/apk-tool/.version`（在 rootfs 内部，随 rootfs 重装一起消失 —— 这正是我们要的）。
          */
-        private const val ASSETS_VERSION = "rev-2"
+        private const val ASSETS_VERSION = "rev-3"
 
-        /** flutter-re 自愈校验点：任一缺失即整包覆盖重解（对齐 FBox 的 hasCompleteToolchain / 补丁检查）。 */
+        /** flutter-re 自愈校验点：任一缺失即覆盖投送随包文件，保留可复用编译缓存。 */
         private val FLUTTER_RE_REQUIRED = listOf(
             "setup.sh",                            // FBox 的 hasCompleteToolchain 也校验它（见其报错原文）
             "blutter/blutter.py",
@@ -115,7 +115,7 @@ class ReverseAssets @Inject constructor(
     /**
      * 按需释放全部资产到容器内 `/root/…`；已就绪则快速返回。幂等，可在每次进容器前调用。
      *
-     * [force] 为 true 时忽略版本标记强制重解（排障用）。
+     * [force] 为 true 时忽略版本标记并覆盖投送随包资产（排障用）。
      */
     fun ensureInstalled(
         profile: ContainerProfile = ContainerProfile.BUILTIN_ALPINE,
@@ -137,12 +137,12 @@ class ReverseAssets @Inject constructor(
         // 就绪判断必须是**纯检查**（不能带安装副作用），否则会漏装后续资产。
         // 校验真实文件而非只信 marker：rootfs 若被重装，marker 随 rootfs 一起消失，自然触发重解。
         val flutterReReady = FLUTTER_RE_REQUIRED.all { File(flutterReDir(profile), it).isFile }
-        val upToDate = !force &&
-            marker.isFile && marker.readText().trim() == ASSETS_VERSION &&
+        val versionMatches = marker.isFile && marker.readText().trim() == ASSETS_VERSION
+        val upToDate = !force && versionMatches &&
             File(apkTool, "apk_tool.py").isFile &&
             File(apkTool, "reapk/api.py").isFile &&
             File(soToolDir(profile), "so_tool.py").isFile &&
-            File(containerInstaller.aicodeDir, "skills/apk-re/SKILL.md").isFile &&
+            BUILTIN_SKILLS.all { File(containerInstaller.aicodeDir, "skills/$it/SKILL.md").isFile } &&
             flutterReReady
 
         if (upToDate) {
@@ -154,7 +154,7 @@ class ReverseAssets @Inject constructor(
         try {
             installApkTool(profile)
             installSoTool(profile)
-            installFlutterReHealing(profile)
+            installFlutterReHealing(profile, refresh = force || !versionMatches)
             installSkills()
             installBlutterConfig()
             marker.parentFile?.mkdirs()
@@ -184,24 +184,18 @@ class ReverseAssets @Inject constructor(
         copyAssetFile("$ASSET_DIR/so_tool/so_tool.py", File(dest, "so_tool.py"))
     }
 
-    /** flutter-re.tar → /root/flutter-re/…。带逐项自愈：缺任一必需文件即整包覆盖重解。 */
-    private fun installFlutterReHealing(profile: ContainerProfile) {
+    private fun installFlutterReHealing(profile: ContainerProfile, refresh: Boolean) {
         val dest = flutterReDir(profile)
-        if (FLUTTER_RE_REQUIRED.all { File(dest, it).isFile }) return
-        dest.deleteRecursively()
-        runCatching { installFlutterRe(profile) }.onFailure {
-            FileLogger.e(
-                TAG,
-                "flutter-re 版本自愈失败：覆盖后容器 blutter 源码仍未包含所需兼容补丁" +
-                    "（BLUTTER_DART_SINGLE_SNAPSHOT / FBOX_UNKNOWN_ABSTRACT_TYPE），" +
-                    "请检查 assets/reverse/flutter-re.tar 是否已内置对应补丁",
-                it
-            )
+        if (!refresh && FLUTTER_RE_REQUIRED.all { File(dest, it).isFile }) return
+        // 编译缓存不在资产包中，升级仅覆盖随包文件，保留已下载的 Dart SDK 与解析器。
+        installFlutterRe(profile)
+        check(FLUTTER_RE_REQUIRED.all { File(dest, it).isFile }) {
+            "Flutter reverse assets are incomplete after extraction"
         }
     }
 
     /**
-     * 解压 flutter-re.tar 到 `/root/flutter-re/`。
+     * 将 flutter-re.tar 覆盖解压到 `/root/flutter-re/`；归档未包含的编译缓存保持不变。
      *
      * 资产虽名为 `.tar`，实为 **gzip 压缩**（魔数 `1f 8b`，与 FBox APK 内一致），故走 GZIP。
      * 复用 [ContainerInstaller.extractRootfsTo]：它已正确处理目录 / 符号链接 / 硬链接 / 权限位

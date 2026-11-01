@@ -1642,4 +1642,6 @@
     <string name="blutter_card_running">Blutter analyzing… %1$s</string>
     <string name="blutter_card_done">Blutter analysis complete (no AI cost)</string>
     <string name="blutter_card_failed">Blutter analysis failed</string>
+    <string name="blutter_cached_result_summary">Using completed analysis: /root/out/%1$s/ (pp.txt / asm/ / objs.txt)</string>
+    <string name="blutter_incomplete_result_summary">Blutter returned success, but the analysis output is incomplete; it has not been marked as completed.</string>
 </resources>

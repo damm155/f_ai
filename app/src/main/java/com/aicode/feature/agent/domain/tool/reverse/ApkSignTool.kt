@@ -13,12 +13,16 @@ import com.android.apksig.ApkVerifier
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import java.io.File
+import java.nio.file.FileAlreadyExistsException
+import java.nio.file.Files
+import java.nio.file.LinkOption
 import java.security.KeyStore
 import java.security.PrivateKey
 import java.security.cert.X509Certificate
@@ -101,7 +105,10 @@ class ApkSignTool @Inject constructor(
 
         // 容器路径 → 宿主真实文件（签名必须走宿主 File，apksig 读不到 proot 内部视角）
         val input = runCatching { pathMapper.toHostFile(apkArg) }.getOrElse {
-            return@withContext ToolResult.Error("输入路径无法解析：$apkArg（${it.message}）", "BAD_PATH")
+            if (it is CancellationException) throw it
+            return@withContext ToolResult.Error(
+                "输入路径无法解析：$apkArg（${it.javaClass.simpleName}）", "BAD_PATH"
+            )
         }
         if (!input.isFile) {
             return@withContext ToolResult.Error(
@@ -109,47 +116,76 @@ class ApkSignTool @Inject constructor(
             )
         }
 
-        val output = if (outArg.isNotBlank()) {
+        val output = (if (outArg.isNotBlank()) {
             runCatching { pathMapper.toHostFile(outArg) }.getOrElse {
-                return@withContext ToolResult.Error("输出路径无法解析：$outArg（${it.message}）", "BAD_PATH")
+                if (it is CancellationException) throw it
+                return@withContext ToolResult.Error(
+                    "输出路径无法解析：$outArg（${it.javaClass.simpleName}）", "BAD_PATH"
+                )
             }
         } else {
             File(input.parentFile, input.nameWithoutExtension + DEFAULT_SUFFIX + ".apk")
-        }
+        }).absoluteFile
 
-        if (output.absolutePath == input.absolutePath) {
-            return@withContext ToolResult.Error(
-                "输出路径与输入相同，apksig 不允许原地覆盖：请换一个 out（如 ${input.nameWithoutExtension}-signed.apk）",
-                "SAME_PATH"
-            )
-        }
-        output.parentFile?.mkdirs()
-        if (output.exists()) output.delete()
-
+        var temporaryOutput: File? = null
         try {
+            if (output.canonicalFile == input.canonicalFile) {
+                return@withContext ToolResult.Error(
+                    "输出路径与输入相同，apksig 不允许原地覆盖：请换一个 out（如 ${input.nameWithoutExtension}-signed.apk）",
+                    "SAME_PATH"
+                )
+            }
+            if (Files.exists(output.toPath(), LinkOption.NOFOLLOW_LINKS)) {
+                throw FileAlreadyExistsException(output.absolutePath)
+            }
+            output.parentFile?.mkdirs()
+            val signedApk = File.createTempFile(".apksign-", ".tmp", output.parentFile)
+            temporaryOutput = signedApk
+            ensureActive()
             val (alias, signerConfig) = loadSignerConfig()
 
             ApkSigner.Builder(listOf(signerConfig))
                 .setInputApk(input)
-                .setOutputApk(output)
+                .setOutputApk(signedApk)
                 .setV1SigningEnabled(true)
                 .setV2SigningEnabled(true)
+                .setV3SigningEnabled(false)
                 .build()
                 .sign()
 
-            // 自查：签完立刻验一遍，避免把「装不上」的包交给用户
-            val verified = ApkVerifier.Builder(output).build().verify()
-            if (!verified.isVerified) {
-                val errs = verified.errors.joinToString("; ") { it.toString() }.ifBlank { "未知原因" }
+            ensureActive()
+            val verified = ApkVerifier.Builder(signedApk).build().verify()
+            // 综合校验会按 minSdk 跳过旧签名方案，限定平台范围才能分别证明 V1/V2 有效。
+            val v1Verification = ApkVerifier.Builder(signedApk)
+                .setMinCheckedPlatformVersion(23)
+                .setMaxCheckedPlatformVersion(23)
+                .build()
+                .verify()
+            val v2Verification = ApkVerifier.Builder(signedApk)
+                .setMinCheckedPlatformVersion(24)
+                .setMaxCheckedPlatformVersion(28)
+                .build()
+                .verify()
+            if (!verified.isVerified ||
+                !v1Verification.isVerified || !v1Verification.isVerifiedUsingV1Scheme ||
+                !v2Verification.isVerified || !v2Verification.isVerifiedUsingV2Scheme
+            ) {
+                val errs = listOf(verified, v1Verification, v2Verification)
+                    .flatMap { it.errors }
+                    .joinToString("; ") { it.issue.name }
+                    .ifBlank { "未通过 V1/V2 签名校验" }
                 FileLogger.w(TAG, "签名后校验未通过：$errs")
-                return@withContext ToolResult.Error(
-                    "签名已生成但自校验未通过：$errs（产物 ${output.absolutePath}）", "VERIFY_FAILED"
-                )
+                return@withContext ToolResult.Error("签名自校验未通过：$errs", "VERIFY_FAILED")
             }
 
             val containerPath = runCatching { pathMapper.toContainerPath(output.absolutePath) }
-                .getOrDefault(output.absolutePath)
+                .getOrElse {
+                    if (it is CancellationException) throw it
+                    output.absolutePath
+                }
 
+            ensureActive()
+            Files.move(signedApk.toPath(), output.toPath())
             FileLogger.i(TAG, "签名完成：$containerPath（alias=$alias, ${output.length()} 字节）")
             ToolResult.Success(
                 buildJsonObject {
@@ -158,11 +194,9 @@ class ApkSignTool @Inject constructor(
                     put("bytes", output.length())
                     put("signer", alias)
                     put("issuer", "CN=LinuxBox Patch")
-                    // apksig 的验证器在 minSdk>=24 且 v2 通过时会跳过 v1 校验（v1 条目其实已写入），
-                    // 因此 v1=false 时不必惊动用户，v2 为 true 即代表 Android 7+ 可装。
-                    put("v2Verified", verified.isVerifiedUsingV2Scheme)
+                    put("v2Verified", v2Verification.isVerifiedUsingV2Scheme)
                     put("v3Verified", verified.isVerifiedUsingV3Scheme)
-                    put("v1Verified", verified.isVerifiedUsingV1Scheme)
+                    put("v1Verified", v1Verification.isVerifiedUsingV1Scheme)
                     put(
                         "hint",
                         "已可安装。用 sendFile 把 $containerPath 发给用户；" +
@@ -172,9 +206,14 @@ class ApkSignTool @Inject constructor(
             )
         } catch (e: CancellationException) {
             throw e
+        } catch (e: FileAlreadyExistsException) {
+            ToolResult.Error("输出文件已存在：${output.absolutePath}，请换一个 out。", "FILE_ALREADY_EXISTS")
         } catch (e: Throwable) {
-            FileLogger.w(TAG, "签名失败：${e.message}", e)
-            ToolResult.Error("签名失败：${e.javaClass.simpleName}: ${e.message}", "SIGN_FAILED")
+            // keystore/签名异常可能包含敏感数据，不回显异常消息或堆栈。
+            FileLogger.w(TAG, "签名失败：${e.javaClass.simpleName}")
+            ToolResult.Error("签名失败：${e.javaClass.simpleName}", "SIGN_FAILED")
+        } finally {
+            runCatching { temporaryOutput?.delete() }
         }
     }
 

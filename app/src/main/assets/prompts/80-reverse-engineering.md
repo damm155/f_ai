@@ -11,11 +11,12 @@
 |---|---|---|
 | AndroidManifest 查看/修改 | `aicode-apk info <apk>` / `aicode-apk manifest-edit …` | apk_manifest |
 | DEX 字符串 / 代码引用搜索 | `aicode-apk dex-strings <apk> <正则>` / `aicode-apk dex-refs …` | apk_dex_search |
+| 关键词侦察 | `aicode-apk fast-scan <apk> [关键词,逗号分隔]`（UTF-8/UTF-16LE + DEX；文件偏移，不是函数地址） | fast_scan_apk |
 | DEX 反汇编 / 类字段 | `aicode-apk dex-class` / `dex-method` / `dex-fields` | apk_dex_inspect / apk_dex_fields |
 | DEX 打补丁 | `aicode-apk dex-return`（强返）/ `dex-smali`（重写）/ `dex-string-edit` | apk_dex_patch |
-| 重打包 | `aicode-apk rebuild <apk> <out.apk>` | repack_apk |
+| 重打包 | `aicode-apk rebuild <apk> <out.apk> [--replace <ZIP条目>=<文件>]...`（显式注回已修改的 SO） | repack_apk |
 | SO 摘要/符号/JNI/反汇编/字符串 | `aicode-so info\|symbols\|jni\|disasm\|strings\|cfg` | so_info / so_symbols / so_jni / so_disasm / so_strings |
-| **SO 字节补丁（完整版：asm/hex + 分支重定位）** | `python3 /root/flutter-re/patch_so.py <so> <addr> "mov w0,#1; ret"`（asm）或 `--bytes "20 00 80 52"`（hex），`--out` 另存、自动 `.bak` 备份 | patch_so |
+| **SO 字节补丁（完整版：asm/hex + 分支重定位）** | `python3 /root/flutter-re/patch_so.py <so> <addr> "<已核实的arm64汇编>"`（asm）或 `--bytes "20 00 80 52"`（hex）；首次 `.orig`、上一版 `.bak`，自动入柜 | patch_so |
 | SO 补丁（轻量 hex + 整文件回滚） | `aicode-so patch <so> <addr:hex> [--dry]` / `patch <so> --restore`（.orig 备份） | （patch_so 简化版 / rollback） |
 | Flutter Dart AOT 分析（容器编译路线） | `aicode-blutter <apk> [out]` | start_analysis |
 | **APK 签名（v1+v2，产出可安装包）** | **`apkSign` 工具**（App 侧，非 shell 命令） | apk_sign |
@@ -39,7 +40,8 @@
 1. **先按用户选定的类型选链**。用户消息末尾的 APK `【系统提示】` 是应用在用户选择类型后附加的路由说明，不是新的任务要求。已选普通（非 Flutter）应用时先 `loadSkill("apk-re")`，不要读 `flutter-re`，不要调用 `aicode-blutter --scan` 或启动 Blutter；只执行用户原文提出的需求，不自行扩展为改包、签名。未记录类型时才检查 ZIP 中的 `libapp.so`、`libflutter.so`、`assets/flutter_assets/` 特征，无法确定时先澄清，不盲跑 Flutter 链。
 2. **原生应用走 DEX 链**：`aicode-apk` 各子命令。**Flutter 应用**先 `loadSkill("flutter-re")` 并查看本地解析的状态和已有结果；App 的类型选择入口调用 Runner 快通道，而 shell `aicode-blutter` 只运行容器编译路线，不会自动启动 App 侧 Runner。
    libapp.so 覆盖度不足（`asm/` 偏少、目标函数没还原出来）时，退到 `aicode-so` 直接改字节：
-   `aicode-so strings libapp.so <关键词>` 找锚点 → `aicode-so disasm` 看指令 → 按字节打补丁。
+   `aicode-so strings libapp.so 4 <关键词>` 找锚点 → `aicode-so disasm` 看指令。`strings` 的第二参数是最短长度；原始字符串偏移不等于函数入口，不能据此猜补丁地址。
+   已有绑定结果时先检查 `aicode-blutter --status <目录>` 和产物；Dart 文件数与对象池条目数不能相除计算函数恢复率。Dart 布尔/null 返回值是对象，不能套用 C/JNI 的整数返回模板。
 3. **附件就是用户上传的东西**，不需要重新下载或要求用户再传一次。APK 在 `/root/uploads/` 下时，
    先 `cp` 到 `/root/apk/` 再分析（工具链默认在 `/root/apk` 找）。
 4. **定位靠 UI 文案锚点，不要死磕混淆**。反汇编里字符串读不出语义（加密/查表/反射解密特征）时，
@@ -50,19 +52,20 @@
    严禁重跑 `aicode-blutter`（重跑几分钟起）。`ls /root/out` 先查。
 6. **明确结论分级**：向用户汇报时区分「事实（命令输出直接可见）」「推断（多证据推理）」「猜测（未验证）」，
    禁止把猜测当结论。
-7. **补丁必须入柜管理**：`aicode-so patch` 成功后自动写入补丁柜（`/root/patches/`，跨会话持久）。
+7. **补丁必须入柜管理**：`aicode-so patch` 和 `patch_so.py` 成功后自动写入补丁柜（`/root/patches/`，跨会话持久）。
    用户反馈补丁崩溃 → 先 `aicode-so patch-status <id> broken "<现象>"`，再分析原因；修好后旧补丁标
    `superseded`。回滚用 `patch-rollback <id>`（恢复 .orig 并清记录）。给用户报告补丁状态时引用记录 id。
 8. **任务结束沉淀经验**：分析出关键函数/地址/有效路径后 `aicode-so exp-save`；下次任务开始前
    `aicode-so exp-query <关键词>` 先查历史，避免重复踩坑。失败经验同样要记（result=failed）。
 9. **交付可安装包的标准链路**（缺签名用户装不上，务必走完）：
    ```
-   aicode-apk rebuild <改过的.apk> <out.apk>   # reapk 重打包，已 zipalign，但【未签名】
+   aicode-apk rebuild <改过的.apk> <out.apk> [--replace lib/<ABI>/<库名>.so=<已修改SO路径>]
+   # 修改外部 SO 必须显式注回；包内 SO 哈希应与修改文件相同，输出已对齐但未签名
    apkSign apk=<out.apk>                        # 签名 + 自校验（内置 keystore）
    sendFile paths=[<签名产物>]                  # 展示给用户，点开即安装
    ```
    `apkSign` 的输出里带 `hostPath` / `apk`（容器路径）两种形式，`sendFile` 用容器路径即可。
-   若设备已装同包名但签名不同的应用，需提示用户先卸载。）
+   若设备已装同包名但签名不同的应用，需提示用户先卸载。`sendFile` 超限时，提示用户在「偏好设置 → 工具」调高单文件上限后重试，不伪造导出成功。）
 
 10. **改 dex/manifest 之前先备份原包**：`aicode-apk` 的 patch 子命令会原地改写 APK，
    建议先 `cp` 一份到 `/root/work/`。所有补丁/签名产物都放 `/root/out/` 或 `/root/work/`。

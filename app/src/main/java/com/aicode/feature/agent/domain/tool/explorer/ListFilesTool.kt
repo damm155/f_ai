@@ -94,7 +94,7 @@ class ListFilesTool @Inject constructor(
 
                 if (!fileAccess.isDirectory(path) || options.directoryOnly) {
                     val name = path.substringAfterLast('/').ifBlank { containerPath }
-                    appendEntry(LsEntry(name, path), options, ::appendLine)
+                    appendEntry(statEntry(name, path), options, ::appendLine)
                     return
                 }
 
@@ -195,9 +195,9 @@ class ListFilesTool @Inject constructor(
     private fun listEntries(dirPath: String, options: LsOptions): List<LsEntry> {
         val entries = mutableListOf<LsEntry>()
         if (options.showAll && !options.showAlmostAll) {
-            entries.add(LsEntry(".", dirPath, isDir = true, size = 0, lastModified = 0, permissions = "rwx"))
+            entries.add(statEntry(".", dirPath))
             fileAccess.parentPath(dirPath)?.let { parent ->
-                entries.add(LsEntry("..", parent, isDir = true, size = 0, lastModified = 0, permissions = "rwx"))
+                entries.add(statEntry("..", parent))
             }
         }
         val children = fileAccess.listFiles(dirPath)
@@ -217,6 +217,15 @@ class ListFilesTool @Inject constructor(
         if (options.reverse) entries.reverse()
         return entries
     }
+
+    private fun statEntry(name: String, path: String): LsEntry = LsEntry(
+        name = name,
+        fullPath = path,
+        isDir = fileAccess.isDirectory(path),
+        size = fileAccess.fileSize(path),
+        lastModified = fileAccess.lastModified(path),
+        permissions = fileAccess.permissions(path)
+    )
 
     private fun appendEntry(
         entry: LsEntry,

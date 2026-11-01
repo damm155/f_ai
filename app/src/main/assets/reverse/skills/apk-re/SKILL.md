@@ -23,17 +23,18 @@ description: 原生 APK 逆向（AndroidManifest / DEX 查改与重打包）。�
 | 用途 | 命令 |
 |---|---|
 | Manifest 查询 | `aicode-apk info <apk>` |
-| Manifest 修改 | `aicode-apk manifest-edit <apk> debuggable=1,cleartext=1,perm=android.permission.X --out <out.apk>` |
+| Manifest 修改 | `aicode-apk manifest-edit <apk> debuggable=1,cleartext=1,perm=android.permission.X <out.apk>` |
 | DEX 搜字符串 | `aicode-apk dex-strings <apk> <正则>` |
+| 关键词侦察 | `aicode-apk fast-scan <apk> [关键词,逗号分隔]` |
 | DEX 查引用（类→方法） | `aicode-apk dex-refs <apk> <正则>` |
 | 列类的方法 | `aicode-apk dex-class <apk> <类描述符>` |
 | 反汇编方法（smali） | `aicode-apk dex-method <apk> <类描述符> <方法名>` |
 | 列类字段 | `aicode-apk dex-fields <apk> <类描述符>` |
 | 强制返回 | `aicode-apk dex-return <apk> <类> <方法> true\|false\|null\|void` |
 | smali 重写 | `aicode-apk dex-smali <apk> <类> <方法> <smali文件>` |
-| 改字符串 | `aicode-apk dex-string-edit <apk> <旧串> <新串> --out <out.apk>` |
+| 改字符串 | `aicode-apk dex-string-edit <apk> <旧串> <新串> <out.apk>` |
 | 交叉引用 | `aicode-apk dex-xref <apk> <method\|field\|type> <目标>` |
-| 重打包（**未签名**） | `aicode-apk rebuild <apk> <out.apk>` |
+| 重打包（**未签名**） | `aicode-apk rebuild <apk> <out.apk> [--replace <ZIP条目>=<文件>]...` |
 | 签名（App 侧工具） | `apkSign apk=<容器路径>` — 不是 shell 命令 |
 
 路径约定：APK 放 `/root/apk/`（参数传文件名即可）；临时产物放 `/root/work/`；用户上传的附件在 `/root/uploads/`。
@@ -51,14 +52,14 @@ description: 原生 APK 逆向（AndroidManifest / DEX 查改与重打包）。�
      - 返回 true：`const/4 v0, #1` + `return v0`
      - 返回 false：`const/4 v0, #0` + `return v0`
      - 跳过调用：把 invoke 行改为 `nop` 或删掉
-   - **改字符串（文案/URL）**：`dex-string-edit`，新旧串精确匹配，新串**不得比旧串长**（MUTF-8 编码后），需 `--out`。
+   - **改字符串（文案/URL）**：`dex-string-edit`，新旧串精确匹配，新串**不得比旧串长**（MUTF-8 编码后），输出文件是最后一个位置参数；工具重排字符串池及引用并重算校验和。
 7. **重打包 + 签名**：
    ```
    aicode-apk rebuild <改过的.apk> /root/work/out.apk   # 已 zipalign，但【未签名】
    apkSign apk=/root/work/out.apk                        # 签名 + 自校验
    sendFile paths=[<签名产物容器路径>]
    ```
-8. **收尾**：告知产物路径，提醒签名与原版不同需先卸载原版；若有 SignatureCheck 可能闪退，用 `dex-strings "signature"` 定位校验方法再补丁。
+8. **收尾**：告知产物路径，提醒签名与原版不同需先卸载原版。`sendFile` 报文件超限时，告知用户在「偏好设置 → 工具」调高单文件上限后重试，不伪造导出成功。
 
 ## 三、字符串加密混淆应对（np/protect 等加固）
 
@@ -86,10 +87,12 @@ description: 原生 APK 逆向（AndroidManifest / DEX 查改与重打包）。�
 - 多 dex 应用：工具自动遍历全部 `classesN.dex`。
 - native 方法在 DEX 里没有代码体，`dex-class` 会标 `[native]`；要改 native 逻辑得动 so，用 `aicode-so` 或 `patch_so.py`。
 - `dex-smali` 重写后整 DEX 重排（池扩容），文件变大属正常；SHA-1/Adler32 自动重算。
-- `manifest-edit` 产出新 APK 文件；`dex-return`/`dex-smali` 原地改。两者可叠加（先 manifest-edit 出文件，再在新文件上打 dex 补丁）。
+- `manifest-edit` 产出新 APK 文件，`debuggable=0`、`cleartext=0` 表示关闭；`dex-return`/`dex-smali` 原地改。两者可叠加（先 manifest-edit 出文件，再在新文件上打 dex 补丁）。
+- `dex-xref` 按所属类、名称及可选签名/字段类型精确查引用，不能只看同名方法的命中数。
+- 修改外部 SO 后，`rebuild` 必须带 `--replace lib/<ABI>/<库名>.so=<已修改文件>`，随后对比包内库哈希并签名。
 - Android 9 及以下不认 v2-only 签名——`apkSign` 是 v1+v2 都签，无需关心。
 - 若用户要「破解付费/绕过服务器校验」等违规需求，礼貌拒绝并说明只能用于学习与合法逆向。
 
 ## 六、自定义技能说明
 
-用户可在容器 `/root/ai-skills/` 放置同名 `.md` 自定义技能（覆盖本默认技能）。
+自定义技能使用 `~/.aicode/skills/<名称>/SKILL.md` 或 `<工作区>/.aicode/skills/<名称>/SKILL.md`，同名项目级优先。

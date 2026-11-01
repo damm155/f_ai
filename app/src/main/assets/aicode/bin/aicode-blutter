@@ -6,99 +6,458 @@
 #   ② 本命令（容器内现场 cmake/ninja 编译）——万金油，但首次某 Dart 版本要联网拉 SDK，可能十几分钟；
 #   ③ 兜底：用 aicode-so 直接静态分析 libapp.so（无需 blutter 还原函数名也能改字节）。
 #
-# 用法：
-#   aicode-blutter <apk路径> [输出目录]        完整分析（慢：首次某 Dart 版本要联网拉 Dart SDK）
-#   aicode-blutter --scan <apk路径>            秒级特征侦察（不解压、不编译：查 libapp.so/libflutter.so/
-#                                              flutter_assets/dex 数量 + arm64 缺失提醒 + ELF 魔数校验）
-#                                              对应 FBox fast_scan_apk，分析前必做
-#   aicode-blutter --status [输出目录]          查看分析进度/是否已有结果（对应 FBox analysis_status）
-#   aicode-blutter --search <目录|out> <正则>   全文搜特征串/函数名（pp.txt + asm/），对应 FBox search_flutter
-#   aicode-blutter --read <文件> [行数]         精读结果文件片段（默认 4000 字符上限），对应 read_flutter_result
-#
 # 输出（默认 /root/out/<apk 名>/）：pp.txt 常量池/类名、asm/ Dart 反汇编、objs.txt 对象结构
 #
 # 兼容性提示：容器内这套 blutter 源码工具链对新版 Dart 适配有限（双→单快照、Closure 布局等），
 # 失败时日志会给出指引，请退到路线 ③（aicode-so 直接分析字节）。
 set -u
 
+usage() {
+  printf '%s\n' \
+    '用法：aicode-blutter <apk路径> [输出目录=/root/out/<apk名去.apk>]' \
+    '      aicode-blutter --help | -h' \
+    '      aicode-blutter --scan <apk路径>' \
+    '      aicode-blutter --status [输出目录|输出名]' \
+    '      aicode-blutter --search <目录> <正则> [limit=30] [offset=0] [per_file=3]' \
+    '      aicode-blutter --read <文件> [limit=4000] [start_line=1] [start_char=0]' \
+    'status/search/read 只读取已有结果，不会自动分析。' \
+    'search 忽略大小写，逐行全量计数；pp.txt/objs.txt/asm 优先，页内每文件每轮 per_file 条。' \
+    'offset 为轮转命中序列位置，按 next_offset 翻页可访问同文件后续命中。' \
+    'search 的 limit/per_file 为正整数、offset 为非负整数；每次最多 200 条。' \
+    'read 的 limit 是字符数，start_line 从 1 起，start_char 是该行内从 0 起的字符偏移。' \
+    'search/read 的全部输出均不超过 16000 UTF-8 字节；长路径和行会截短。' \
+    '默认分析沿用容器编译路线；已完成且与 APK 匹配的有效产物直接复用，重解析请用 App。'
+}
+
 MODE="run"
 case "${1:-}" in
+  --help|-h) usage; exit 0 ;;
   --scan)   MODE="scan";   shift ;;
   --status) MODE="status"; shift ;;
   --search) MODE="search"; shift ;;
   --read)   MODE="read";   shift ;;
+  -*) printf '参数错误：未知模式 %s（用 --help 查看用法）\n' "$1" >&2; exit 2 ;;
 esac
 
-# ---------- --read：精读结果文件 ----------
 if [ "$MODE" = "read" ]; then
-  [ $# -ge 1 ] || { echo "用法: aicode-blutter --read <结果文件> [最大字符数=4000]" >&2; exit 2; }
   python3 - "$@" <<'PYEOF'
 import sys
-p=sys.argv[1]; limit=int(sys.argv[2]) if len(sys.argv)>2 else 4000
+
 try:
-    data=open(p,'rb').read()
-except OSError as e:
-    print("✗ 读不了: %s" % e); sys.exit(1)
-text=data.decode('utf-8','replace')
-print("✓ %s（共 %d 字符，显示前 %d）:" % (p, len(text), min(limit,len(text))))
-print(text[:limit])
-if len(text)>limit:
-    print("…（截断，共 %d 字符。用 sed -n '起,止p' %s 精读后续行区间）" % (len(text), p))
+    if not 1 <= len(sys.argv[1:]) <= 4:
+        raise ValueError("--read <文件> [limit=4000] [start_line=1] [start_char=0]")
+    limit = min(int(sys.argv[2]), 16000) if len(sys.argv) > 2 else 4000
+    start = int(sys.argv[3]) if len(sys.argv) > 3 else 1
+    start_char = int(sys.argv[4]) if len(sys.argv) > 4 else 0
+    if limit < 1 or not 1 <= start <= sys.maxsize or not 0 <= start_char <= sys.maxsize:
+        raise ValueError("整数范围")
+except ValueError:
+    print("参数错误：--read <文件> [limit=4000] [start_line=1] [start_char=0]；limit/start_line 须为正整数，start_char 须非负", file=sys.stderr)
+    sys.exit(2)
+
+path = sys.argv[1]
+text = ""
+truncated = False
+try:
+    with open(path, encoding="utf-8", errors="replace") as stream:
+        skipped = 0
+        while skipped < start - 1:
+            part = stream.readline(4096)
+            if not part:
+                break
+            if part.endswith("\n"):
+                skipped += 1
+        if skipped == start - 1:
+            remaining = start_char
+            while remaining > 0:
+                part = stream.read(min(remaining, 4096))
+                if not part or "\n" in part:
+                    raise ValueError("start_char 超出指定行")
+                remaining -= len(part)
+            text = stream.read(limit + 1)
+            truncated = len(text) > limit
+            text = text[:limit]
+except (OSError, ValueError) as error:
+    print("读取失败：%s" % str(error)[:300], file=sys.stderr)
+    sys.exit(1)
+
+# 给元数据预留字节，中文内容也不能突破调用方的输出预算。
+encoded = text.encode("utf-8")
+if len(encoded) > 15000:
+    text = encoded[:15000].decode("utf-8", "ignore")
+    truncated = True
+end = start + text.count("\n") - (1 if text.endswith("\n") else 0) if text else start - 1
+if truncated:
+    completed_lines = text.count("\n")
+    if completed_lines:
+        next_line, next_char = start + completed_lines, len(text.rsplit("\n", 1)[-1])
+    else:
+        next_line, next_char = start, start_char + len(text)
+else:
+    next_line, next_char = "none", "none"
+shown_path = path.replace("\n", "\\n").replace("\r", "\\r").encode("utf-8")
+if len(shown_path) > 360:
+    shown_path = b"..." + shown_path[-357:]
+shown_path = shown_path.decode("utf-8", "ignore")
+print("文件：%s" % shown_path)
+print(text, end="" if text.endswith("\n") else "\n")
+print("读取：start_line=%d start_char=%d end_line=%d chars=%d bytes=%d limit=%d truncated=%s next_line=%s next_char=%s" % (
+    start, start_char, end, len(text), len(text.encode("utf-8")), limit,
+    str(truncated).lower(), next_line, next_char))
+print("chars 为显示字符数；截断后同时传 next_line 和 next_char 可继续，不会重读当前行。")
 PYEOF
   exit $?
 fi
 
-# ---------- --search：全文检索 ----------
 if [ "$MODE" = "search" ]; then
-  [ $# -ge 2 ] || { echo "用法: aicode-blutter --search <结果目录|/root/out> <正则> [最多命中=30]" >&2; exit 2; }
   python3 - "$@" <<'PYEOF'
-import sys, os, re
-root=sys.argv[1]; pat=sys.argv[2]; cap=int(sys.argv[3]) if len(sys.argv)>3 else 30
+import os
+import re
+import sys
+
+try:
+    if not 2 <= len(sys.argv[1:]) <= 5:
+        raise ValueError("参数个数")
+    cap = min(int(sys.argv[3]), 200) if len(sys.argv) > 3 else 30
+    offset = int(sys.argv[4]) if len(sys.argv) > 4 else 0
+    per_file = int(sys.argv[5]) if len(sys.argv) > 5 else 3
+    if cap < 1 or not 0 <= offset <= sys.maxsize or not 1 <= per_file <= sys.maxsize:
+        raise ValueError("整数范围")
+    rx = re.compile(sys.argv[2], re.I)
+except (ValueError, re.error, OverflowError):
+    print("参数错误：--search <目录> <正则> [limit=30] [offset=0] [per_file=3]；正则须合法，limit/per_file 须为正整数，offset 须非负", file=sys.stderr)
+    sys.exit(2)
+
+root = sys.argv[1]
 if not os.path.isdir(root):
-    print("✗ 目录不存在: %s（/root/out 下的分析结果目录）" % root); sys.exit(1)
-rx=re.compile(pat, re.I)
-files=[]
-for dp,_,fns in os.walk(root):
-    for fn in fns:
-        if fn.endswith(('.txt','.md','.S','.js','.json','.dart')): files.append(os.path.join(dp,fn))
-hits=0
-for f in sorted(files):
-    try: lines=open(f,encoding='utf-8',errors='replace').read().splitlines()
-    except OSError: continue
-    for i,l in enumerate(lines,1):
-        if rx.search(l):
-            print("%s:%d: %s" % (f,i,l.strip()[:200]))
-            hits+=1
-            if hits>=cap:
-                print("…（已达上限 %d，可用更精确的正则）" % cap); sys.exit(0)
-print("共 %d 处命中（%d 个文件被扫）" % (hits,len(files)))
+    print("目录不存在：%s" % root[:300], file=sys.stderr)
+    sys.exit(1)
+
+unreadable = 0
+
+def walk_error(error):
+    global unreadable
+    unreadable += 1
+
+
+def priority(path):
+    name = os.path.basename(path)
+    primary = name in ("pp.txt", "objs.txt") or name.endswith((".dart", ".S")) or "asm" in os.path.relpath(path, root).split(os.sep)
+    return (0 if primary else 1, {"pp.txt": 0, "objs.txt": 1}.get(name, 2), path)
+
+
+files = []
+for directory, _, names in os.walk(root, onerror=walk_error):
+    for name in names:
+        if name.endswith((".txt", ".md", ".S", ".js", ".json", ".dart")):
+            files.append(os.path.join(directory, name))
+files.sort(key=priority)
+groups = [[], []]
+scanned = 0
+for path in files:
+    count = 0
+    try:
+        with open(path, encoding="utf-8", errors="replace") as stream:
+            for line in stream:
+                if rx.search(line):
+                    count += 1
+        scanned += 1
+    except OSError:
+        unreadable += 1
+    if count:
+        groups[priority(path)[0]].append((path, count))
+
+total = sum(count for group in groups for _, count in group)
+targets = {}
+selected = 0
+skip = offset
+for group in groups:
+    group_total = sum(count for _, count in group)
+    if skip >= group_total:
+        skip -= group_total
+        continue
+    rounds = (max(count for _, count in group) + per_file - 1) // per_file
+    low, high = 0, rounds
+    # 按每文件计数跳过完整轮次，巨大 offset 不需要保存或逐条遍历历史命中。
+    while low + 1 < high:
+        middle = (low + high) // 2
+        if sum(min(count, middle * per_file) for _, count in group) <= skip:
+            low = middle
+        else:
+            high = middle
+    skip -= sum(min(count, low * per_file) for _, count in group)
+    round_index = low
+    while round_index < rounds and selected < cap:
+        for path, count in group:
+            available = max(0, min(per_file, count - round_index * per_file))
+            if skip >= available:
+                skip -= available
+                continue
+            first = round_index * per_file + skip
+            amount = min(available - skip, cap - selected)
+            targets.setdefault(path, []).extend((first + index, selected + index) for index in range(amount))
+            selected += amount
+            skip = 0
+            if selected == cap:
+                break
+        round_index += 1
+    if selected == cap:
+        break
+    skip = 0
+
+
+def clipped(text, budget, tail=False):
+    text = text.replace("\r", "\\r").replace("\n", "\\n").replace("\t", "\\t")
+    data = text.encode("utf-8")
+    if len(data) <= budget:
+        return text
+    if tail:
+        return "..." + data[-(budget - 3):].decode("utf-8", "ignore")
+    return data[:budget - 3].decode("utf-8", "ignore") + "..."
+
+
+# 第二遍只收本页最多 200 个片段；不把所有命中内容留在内存中。
+samples = [None] * selected
+for path, wanted in targets.items():
+    position = 0
+    ordinal = 0
+    try:
+        with open(path, encoding="utf-8", errors="replace") as stream:
+            for line_number, line in enumerate(stream, 1):
+                if not rx.search(line):
+                    continue
+                target, slot = wanted[position]
+                if ordinal == target:
+                    samples[slot] = "%s:%d: %s\n" % (
+                        clipped(path, 240, tail=True), line_number, clipped(line[:240].strip(), 240))
+                    position += 1
+                    if position == len(wanted):
+                        break
+                ordinal += 1
+    except OSError:
+        pass
+if any(sample is None for sample in samples):
+    print("读取分页失败：结果已变更或不可读，请重试", file=sys.stderr)
+    sys.exit(1)
+
+emitted = 0
+used = 0
+for sample in samples:
+    size = len(sample.encode("utf-8"))
+    if used + size > 14800:
+        break
+    sys.stdout.write(sample)
+    used += size
+    emitted += 1
+truncated = offset + emitted < total
+next_offset = offset + emitted if truncated else "none"
+print("检索：total_hits=%d scanned_files=%d unreadable_files=%d scan_complete=%s emitted=%d offset=%d limit=%d per_file=%d truncated=%s next_offset=%s" % (
+    total, scanned, unreadable, str(unreadable == 0).lower(), emitted, offset, cap, per_file,
+    str(truncated).lower(), next_offset))
+print("总命中按匹配行计数；next_offset 用于下一页，none 表示已到末尾。长路径/行各最多 240 UTF-8 字节；扫描不完整时总数仅为已知命中。")
 PYEOF
   exit $?
 fi
 
-# ---------- --status：进度 ----------
+blutter_products() {
+  python3 - "$@" <<'PYEOF'
+import os
+import sys
+import tempfile
+import zipfile
+import zlib
+
+command, root = sys.argv[1:3]
+if command == "status" and not os.path.isdir(root) and os.path.basename(root) == root:
+    name = root[:-4] if root.endswith(".apk") else root
+    root = os.path.join("/root/out", name)
+
+marker = os.path.join(root, ".aicode-blutter-completed")
+legacy = os.path.join(root, ".analyzed_meta")
+if command == "record":
+    code = int(sys.argv[3])
+    try:
+        os.makedirs(root, exist_ok=True)
+        temporary = os.path.join(root, ".aicode-blutter-exitcode.tmp")
+        with open(temporary, "w", encoding="utf-8") as stream:
+            stream.write("%d\n" % code)
+        os.replace(temporary, os.path.join(root, ".aicode-blutter-exitcode"))
+    except OSError as error:
+        print("无法保存退出码：%s" % str(error)[:300], file=sys.stderr)
+        sys.exit(1)
+    sys.exit(0)
+
+if command == "identity":
+    try:
+        with zipfile.ZipFile(sys.argv[3]) as archive:
+            for name in ("libapp.so", "libflutter.so"):
+                entry = archive.getinfo("lib/arm64-v8a/" + name)
+                destination = os.path.join(root, "lib/arm64-v8a", name)
+                os.makedirs(os.path.dirname(destination), exist_ok=True)
+                temporary = destination + ".tmp"
+                with archive.open(entry) as source, open(temporary, "wb") as target:
+                    while True:
+                        chunk = source.read(65536)
+                        if not chunk:
+                            break
+                        target.write(chunk)
+                if os.path.getsize(temporary) != entry.file_size:
+                    raise OSError("SO size mismatch: " + name)
+                os.replace(temporary, destination)
+    except (OSError, KeyError, zipfile.BadZipFile) as error:
+        print("无法保存 APK 库身份：%s" % str(error)[:300], file=sys.stderr)
+        sys.exit(1)
+    sys.exit(0)
+
+if command == "prepare":
+    try:
+        for path in (marker, legacy):
+            if os.path.isfile(path):
+                os.unlink(path)
+    except OSError as error:
+        print("无法清理失效完成标记：%s" % str(error)[:300], file=sys.stderr)
+        sys.exit(1)
+    sys.exit(0)
+
+if command == "finish":
+    code = int(sys.argv[3])
+    if code:
+        sys.exit(code)
+
+completed = False
+try:
+    with open(marker, encoding="utf-8") as stream:
+        completed = stream.read(32).strip() == "completed"
+except (OSError, UnicodeError):
+    pass
+legacy_exists = os.path.isfile(legacy)
+if command == "reuse":
+    if not (completed or legacy_exists):
+        sys.exit(1)
+    try:
+        with zipfile.ZipFile(sys.argv[3]) as archive:
+            for name in ("libapp.so", "libflutter.so"):
+                entry = archive.getinfo("lib/arm64-v8a/" + name)
+                path = os.path.join(root, "lib/arm64-v8a", name)
+                if not os.path.isfile(path) or os.path.getsize(path) != entry.file_size:
+                    sys.exit(1)
+                checksum = 0
+                with open(path, "rb") as stream:
+                    while True:
+                        chunk = stream.read(65536)
+                        if not chunk:
+                            break
+                        checksum = zlib.crc32(chunk, checksum)
+                if checksum & 0xffffffff != entry.CRC:
+                    sys.exit(1)
+    except (OSError, KeyError, zipfile.BadZipFile):
+        sys.exit(1)
+
+if not os.path.isdir(root):
+    if command == "status":
+        print("目录不存在：%s" % root[:300], file=sys.stderr)
+    sys.exit(1)
+
+
+def size(name):
+    path = os.path.join(root, name)
+    try:
+        return os.path.getsize(path) if os.path.isfile(path) else None
+    except OSError:
+        return None
+
+
+counts = {"dart_files": 0, "s_files": 0, "function_markers": 0, "function_files": 0, "nonempty_s_files": 0}
+unreadable = 0
+
+
+def walk_error(error):
+    global unreadable
+    unreadable += 1
+
+
+for directory, _, names in os.walk(os.path.join(root, "asm"), onerror=walk_error) if os.path.isdir(os.path.join(root, "asm")) else ():
+    for name in names:
+        if not name.endswith((".dart", ".S")):
+            continue
+        path = os.path.join(directory, name)
+        counts["dart_files" if name.endswith(".dart") else "s_files"] += 1
+        functions = 0
+        try:
+            if name.endswith(".S") and os.path.getsize(path) > 0:
+                counts["nonempty_s_files"] += 1
+            with open(path, encoding="utf-8", errors="replace") as stream:
+                for line in stream:
+                    functions += line.count("// ** addr:")
+        except OSError:
+            unreadable += 1
+        counts["function_markers"] += functions
+        if functions:
+            counts["function_files"] += 1
+valid = (size("pp.txt") or 0) > 0 and (size("objs.txt") or 0) > 0 and (counts["function_files"] > 0 or counts["nonempty_s_files"] > 0)
+
+if command == "reuse":
+    if not valid:
+        sys.exit(1)
+    print("已完成且与 APK 匹配，使用现有输出：%s；重解析请在 App 操作。" % root)
+    sys.exit(0)
+if command == "finish":
+    if not valid:
+        print("分析退出码为 0，但产物不完整：需要非空 pp.txt/objs.txt 和含函数的 asm 文件；未标记完成。", file=sys.stderr)
+        sys.exit(1)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", prefix=".aicode-blutter-completed-", dir=root, delete=False) as stream:
+            temporary = stream.name
+            stream.write("completed\n")
+        os.replace(temporary, marker)
+    except OSError as error:
+        print("无法保存完成标记：%s" % str(error)[:300], file=sys.stderr)
+        sys.exit(1)
+    finally:
+        if temporary and os.path.exists(temporary):
+            os.unlink(temporary)
+    print("分析完成：有效产物已校验，.aicode-blutter-completed 已保存。")
+    sys.exit(0)
+
+print("=== %s ===" % root)
+sidecars = ("README.md", "pp.txt", "objs.txt", "blutter_frida.js", "frida.js", "frida.log", "runner.log")
+for name in sidecars:
+    length = size(name)
+    if length is not None:
+        print("  %s %d 字节%s" % (name, length, "（空文件）" if length == 0 else ""))
+    elif name in ("pp.txt", "objs.txt"):
+        print("  %s 缺失" % name)
+print("  asm/ " + " ".join("%s=%d" % item for item in counts.items()) + " unreadable_files=%d" % unreadable)
+if os.path.isfile(marker):
+    print("  .aicode-blutter-completed %s" % ("有效完成标记" if completed else "内容无效"))
+if legacy_exists:
+    print("  .analyzed_meta 旧完成标记")
+present = os.path.isfile(marker) or legacy_exists or any(size(name) is not None for name in sidecars) or counts["dart_files"] + counts["s_files"] > 0
+state = "completed" if valid and (completed or legacy_exists) else "partial" if present else "unknown"
+label = {"completed": "完成", "partial": "部分", "unknown": "未知"}[state]
+print("状态：%s state=%s products_valid=%s scan_complete=%s" % (label, state, str(bool(valid)).lower(), str(unreadable == 0).lower()))
+print("完成需有效完成标记及非空 pp.txt/objs.txt、含函数标记的 Dart 或非空 .S；只有产物或缺失产物均为部分。")
+PYEOF
+}
+
 if [ "$MODE" = "status" ]; then
+  [ $# -le 1 ] || { printf '参数错误：--status [输出目录|输出名]\n' >&2; exit 2; }
   OUT2="${1:-}"
   if [ -z "$OUT2" ]; then
     echo "=== /root/out 下的分析结果 ==="
     ls -la /root/out 2>/dev/null || echo "（/root/out 尚不存在——还没跑过任何分析）"
     echo
-    echo "提示：aicode-blutter --status <目录> 看某个结果的详情"
+    echo "提示：aicode-blutter --status <目录|输出名> 看某个结果的详情"
     exit 0
   fi
-  if [ ! -d "$OUT2" ]; then echo "✗ 目录不存在: $OUT2"; exit 1; fi
-  echo "=== $OUT2 ==="
-  for f in README.md pp.txt objs.txt frida.js; do
-    [ -f "$OUT2/$f" ] && printf "  %-12s %s 字节\n" "$f" "$(stat -c%s "$OUT2/$f")"
-  done
-  [ -d "$OUT2/asm" ] && echo "  asm/         $(ls "$OUT2/asm" | wc -l) 个文件"
-  [ -f "$OUT2/.analyzed_meta" ] && echo "  .analyzed_meta 存在（已完成的缓存标记）"
-  exit 0
+  blutter_products status "$OUT2"
+  exit $?
 fi
 
 # ---------- --scan：秒级侦察 ----------
 if [ "$MODE" = "scan" ]; then
-  [ $# -ge 1 ] || { echo "用法: aicode-blutter --scan <apk路径>" >&2; exit 2; }
+  [ $# -eq 1 ] || { echo "参数错误：--scan <apk路径>" >&2; exit 2; }
   exec python3 - "$1" <<'PYEOF'
 import sys, zipfile, os
 apk=sys.argv[1]
@@ -134,11 +493,20 @@ PYEOF
 fi
 
 # ---------- 默认：完整分析 ----------
-[ $# -ge 1 ] || { echo "用法: aicode-blutter <apk路径> [输出目录]（或 --scan/--status/--search/--read）" >&2; exit 2; }
+[ $# -ge 1 ] && [ $# -le 2 ] || { usage >&2; exit 2; }
 APK="$1"
 NAME=$(basename "$APK" | sed 's/\.apk$//')
 OUT="${2:-/root/out/$NAME}"
 RE=/root/flutter-re
+
+if [ ! -f "$APK" ]; then
+    echo "✗ 找不到目标：$APK" >&2
+    exit 2
+fi
+
+if blutter_products reuse "$OUT" "$APK"; then
+    exit 0
+fi
 
 if [ ! -f "$RE/blutter/blutter.py" ]; then
     echo "✗ 工具链缺失：$RE/blutter/blutter.py" >&2
@@ -147,12 +515,11 @@ if [ ! -f "$RE/blutter/blutter.py" ]; then
     exit 3
 fi
 
-if [ ! -f "$APK" ]; then
-    echo "✗ 找不到目标：$APK" >&2
-    exit 2
-fi
-
-mkdir -p "$OUT"
+mkdir -p "$OUT" || exit 1
+blutter_products prepare "$OUT" || exit $?
+STAGE=$(mktemp -d "${OUT}.stage.XXXXXX") || exit 1
+cleanup_stage() { rm -rf "$STAGE"; }
+trap cleanup_stage EXIT HUP INT TERM
 
 # ① 环境自愈（幂等）：编译依赖 + pyelftools 齐备时整段跳过（浮窗不闪"环境自愈"）
 if ! python3 -c "import elftools" 2>/dev/null || ! command -v cmake >/dev/null 2>&1 || ! command -v ninja >/dev/null 2>&1; then
@@ -170,4 +537,49 @@ done
 #    切勿传"解压根目录"——find_lib_files() 找不到 libapp.so 会 exit 1，看起来像编译失败。
 echo "▶ blutter 分析开始：$APK → $OUT"
 echo "  （首次分析某个 Dart 版本需联网拉取 Dart SDK，可能耗时十几分钟）"
-exec python3 "$RE/blutter/blutter.py" "$APK" "$OUT"
+python3 "$RE/blutter/blutter.py" "$APK" "$STAGE"
+CODE=$?
+if [ "$CODE" -ne 0 ]; then
+    blutter_products record "$OUT" "$CODE" || exit $?
+    exit "$CODE"
+fi
+blutter_products record "$STAGE" 0 || exit $?
+blutter_products finish "$STAGE" 0
+CODE=$?
+if [ "$CODE" -ne 0 ]; then
+    blutter_products record "$OUT" 0 || exit $?
+    exit "$CODE"
+fi
+blutter_products identity "$STAGE" "$APK" || exit $?
+python3 - "$STAGE" "$OUT" <<'PYEOF'
+import os
+import shutil
+import sys
+
+stage, output = sys.argv[1:3]
+backup = "%s.previous.%d" % (output, os.getpid())
+if os.path.lexists(backup):
+    shutil.rmtree(backup) if os.path.isdir(backup) else os.unlink(backup)
+had_output = os.path.lexists(output)
+if had_output:
+    os.replace(output, backup)
+try:
+    os.replace(stage, output)
+except Exception:
+    if had_output and not os.path.lexists(output):
+        os.replace(backup, output)
+    raise
+if had_output:
+    try:
+        shutil.rmtree(backup) if os.path.isdir(backup) else os.unlink(backup)
+    except OSError as error:
+        try:
+            os.unlink(os.path.join(backup, ".aicode-blutter-completed"))
+        except OSError:
+            pass
+        print("旧结果备份清理失败（已移除完成标记）：%s" % str(error)[:300], file=sys.stderr)
+PYEOF
+CODE=$?
+[ "$CODE" -eq 0 ] || exit "$CODE"
+trap - EXIT HUP INT TERM
+exit 0

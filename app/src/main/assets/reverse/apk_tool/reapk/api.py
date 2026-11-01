@@ -9,7 +9,7 @@ This is the ergonomic entry point most callers want::
 
     apk.manifest.set_debuggable().set_cleartext()
     apk.manifest.add_permission("android.permission.INTERNET")
-    apk.save("patched.apk")              # repackage (zipalign) + v2/v3 sign
+    apk.save("patched.apk")              # repackage (zipalign), unsigned
 
 The classes here are thin, well-typed facades over the package's verified
 procedural core (``axml``, ``dex``, ``zipalign``, ``sign`` ...).
@@ -17,7 +17,9 @@ procedural core (``axml``, ``dex``, ``zipalign``, ``sign`` ...).
 from __future__ import annotations
 
 import io
+import re
 import zipfile
+import zlib
 from typing import List, Optional
 
 from .axml import (
@@ -26,11 +28,12 @@ from .axml import (
 )
 from .bundle import load_base_apk
 from .dex import DexFile, disassemble
-from .errors import BundleError
+from .errors import BundleError, ZipError
 from .manifest import analyze_manifest
-from .zipalign import read_zip_entries, stored_entry, write_aligned_zip
+from .zipalign import read_zip_entries, write_aligned_zip
 
 _MANIFEST = "AndroidManifest.xml"
+_V1_SIGNATURE = re.compile(rb"META-INF/(?:MANIFEST\.MF|[^/]+\.(?:SF|RSA|DSA|EC)|SIG-[^/]+)", re.IGNORECASE)
 
 
 class Manifest:
@@ -52,7 +55,7 @@ class Manifest:
     def info(self) -> dict:
         """Parsed manifest facts (package, components, flags, permissions)."""
         if self._info is None:
-            self._info = analyze_manifest(parse_axml(self._raw, self._arsc))
+            self._info = analyze_manifest(parse_axml(self.to_bytes(), self._arsc))
         return self._info
 
     @property
@@ -84,13 +87,13 @@ class Manifest:
         return self._ir
 
     def set_debuggable(self, value: bool = True) -> "Manifest":
-        """Set ``android:debuggable="true"`` on ``<application>``."""
-        patch_debuggable(self._edit())
+        """Set the boolean ``android:debuggable`` on ``<application>``."""
+        patch_debuggable(self._edit(), value)
         return self
 
     def set_cleartext(self, value: bool = True) -> "Manifest":
-        """Set ``android:usesCleartextTraffic="true"`` (enables HTTP / MITM)."""
-        patch_cleartext(self._edit())
+        """Set the boolean ``android:usesCleartextTraffic`` on ``<application>``."""
+        patch_cleartext(self._edit(), value)
         return self
 
     def add_permission(self, name: str) -> "Manifest":
@@ -169,25 +172,47 @@ class Apk:
         raise BundleError("method not found: %s" % method_sig)
 
     # -- output -----------------------------------------------------------
-    def to_bytes(self, sign: bool = False) -> bytes:
-        """Serialize the APK (repackaging if the manifest was edited).
+    def to_bytes(self, sign: bool = False, replacements: Optional[dict] = None) -> bytes:
+        """Repackage as aligned unsigned APK, replacing only existing ZIP members.
 
-        FBox 裁剪版：签名一律走 Android 侧 apksig（本容器无 Java/cryptography），
-        sign 参数保留只为兼容调用方签名，恒等于未签名输出。
+        Unchanged entries retain their compressed payloads. APK signing blocks
+        are outside ZIP members and are not emitted; v1 signing files are stripped.
+        Signing is performed separately by Android-side apksig.
         """
+        replacements = dict(replacements or {})
         if self._manifest is not None and self._manifest.dirty:
-            entries = [e for e in read_zip_entries(self._data)
-                       if e["name"] != _MANIFEST.encode()]
-            entries.insert(0, stored_entry(_MANIFEST, self._manifest.to_bytes()))
-            data = write_aligned_zip(entries)
-        else:
-            data = self._data
-        return data
+            if _MANIFEST in replacements:
+                raise ValueError("manifest was edited and also supplied as a replacement")
+            replacements[_MANIFEST] = self._manifest.to_bytes()
+        entries = read_zip_entries(self._data)
+        by_name = {}
+        for entry in entries:
+            name = entry["name"].decode("utf-8" if entry["flags"] & 0x800 else "cp437")
+            by_name.setdefault(name, []).append(entry)
+        for name, payload in replacements.items():
+            matches = by_name.get(name, [])
+            if len(matches) != 1:
+                raise ValueError("replacement requires exactly one existing ZIP entry: %s" % name)
+            entry = matches[0]
+            if _V1_SIGNATURE.fullmatch(entry["name"]):
+                raise ValueError("signature files cannot be replaced in an unsigned APK: %s" % name)
+            if entry["method"] == zipfile.ZIP_STORED:
+                raw = payload
+            elif entry["method"] == zipfile.ZIP_DEFLATED:
+                compressor = zlib.compressobj(wbits=-15)
+                raw = compressor.compress(payload) + compressor.flush()
+            else:
+                raise ZipError("unsupported replacement compression method: %d" % entry["method"])
+            entry.update(raw=raw, crc=zlib.crc32(payload) & 0xFFFFFFFF,
+                         csize=len(raw), usize=len(payload))
+        entries = [e for e in entries if not _V1_SIGNATURE.fullmatch(e["name"])]
+        return write_aligned_zip(entries, comment=self._zf.comment)
 
-    def save(self, path: str, sign: bool = False) -> None:
-        """Write the APK to ``path``（zipaligned，未签名；签名由 FBox apksig 完成）."""
+    def save(self, path: str, sign: bool = False, replacements: Optional[dict] = None) -> None:
+        """Write an aligned unsigned APK; signing is performed separately."""
+        data = self.to_bytes(sign=sign, replacements=replacements)
         with open(path, "wb") as f:
-            f.write(self.to_bytes(sign=sign))
+            f.write(data)
 
 
 __all__ = ["Apk", "Manifest"]

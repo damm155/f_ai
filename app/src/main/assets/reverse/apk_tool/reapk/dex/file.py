@@ -1,3 +1,4 @@
+import re
 import struct
 from ..errors import DexError
 import zlib
@@ -250,6 +251,10 @@ class DexFile:
     def patch_return(self, code_off, ret_desc, value):
         """Overwrite a method body with a forced return (in place, nop-padded)."""
         ci = self.code_insns(code_off)
+        if ci["ins"] > ci["regs"]:
+            raise DexError("method input registers exceed registers_size")
+        if ci["insns_off"] + ci["insns_size"] * 2 > len(self.d):
+            raise DexError("method instructions exceed DEX bounds")
         words = build_return_insns(ret_desc, value, ci["regs"])
         if len(words) > ci["insns_size"]:
             raise DexError("method body too small to patch (%d > %d words)"
@@ -264,19 +269,39 @@ class DexFile:
         """Recompute DEX signature (SHA-1) + checksum (Adler-32) after edits."""
         import hashlib
         b = bytearray(self.d)
+        struct.pack_into("<I", b, 0x20, len(b))
         b[12:32] = hashlib.sha1(bytes(b[32:])).digest()
         struct.pack_into("<I", b, 8, zlib.adler32(bytes(b[12:])) & 0xFFFFFFFF)
         self.d = bytes(b)
         return self.d
 
 def build_return_insns(ret_desc, value, regs):
-    """Dalvik bytecode for a forced return. value in {true,false,null,void}."""
-    if ret_desc == "V" or value == "void":
-        return [0x000E]                                   # return-void
-    is_obj = ret_desc.startswith("L") or ret_desc.startswith("[")
-    if regs < 1:
-        raise DexError("method has no registers; cannot synthesize a value return")
-    if is_obj or value == "null":
-        return [0x0012, 0x0011]                           # const/4 v0,#0 ; return-object v0
+    """Construct typed Dalvik returns; true/false are numeric 1/0 for primitives."""
+    if not isinstance(regs, int) or not 0 <= regs <= 0xFFFF:
+        raise DexError("registers_size must be in 0..65535")
+    if value not in ("true", "false", "null", "void"):
+        raise DexError("value must be true/false/null/void")
+    if ret_desc == "V":
+        if value != "void":
+            raise DexError("void return type requires value=void")
+        return [0x000E]
+    is_obj = bool(re.fullmatch(r"L[^;\[.]+;|\[+(?:[ZBSCIJFD]|L[^;\[.]+;)", ret_desc))
+    if not is_obj and ret_desc not in ("Z", "B", "S", "C", "I", "J", "F", "D"):
+        raise DexError("invalid return type descriptor: %s" % ret_desc)
+    if is_obj and value != "null":
+        raise DexError("reference return type requires value=null")
+    if not is_obj and value not in ("true", "false"):
+        raise DexError("primitive return type requires value=true/false")
+    needed = 2 if ret_desc in ("J", "D") else 1
+    if regs < needed:
+        raise DexError("return type %s requires %d registers, method has %d" % (ret_desc, needed, regs))
+    if is_obj:
+        return [0x0012, 0x0011]
     lit = 1 if value == "true" else 0
+    if ret_desc == "J":
+        return [0x0016, lit, 0x0010]
+    if ret_desc == "D":
+        return [0x0019, 0x3FF0, 0x0010] if lit else [0x0016, 0, 0x0010]
+    if ret_desc == "F" and lit:
+        return [0x0015, 0x3F80, 0x000F]
     return [(lit << 12) | 0x12, 0x000F]

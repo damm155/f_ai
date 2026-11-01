@@ -1641,4 +1641,6 @@
     <string name="blutter_card_running">Blutter 本地分析中… %1$s</string>
     <string name="blutter_card_done">Blutter 分析完成（不消耗 AI 额度）</string>
     <string name="blutter_card_failed">Blutter 分析失败</string>
+    <string name="blutter_cached_result_summary">使用已完成的分析结果：/root/out/%1$s/（pp.txt / asm/ / objs.txt）</string>
+    <string name="blutter_incomplete_result_summary">Blutter 返回成功，但分析产物不完整；未标记为完成。</string>
 </resources>

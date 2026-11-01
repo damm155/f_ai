@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""FBox SO 原生库分析工具（python3-pyelftools + capstone，只读分析，不修改文件）。
+"""FBox SO 原生库分析与补丁工具（python3-pyelftools + capstone）。
 
 容器内统一入口，由 Android 侧 LinuxViewModel 经 shell 调用：
     python3 /root/so-tool/so_tool.py <子命令> <参数...>
@@ -12,7 +12,7 @@
   symbols <so> [grep]             函数符号清单（地址+大小+名字，Java_ 静态注册在内）
   jni <so>                        定位 RegisterNatives 动态注册（Java方法名+签名+函数地址）
   disasm <so> <addr|符号> [len]   反汇编（capstone，默认 64 字节，上限 4096）
-  cfg <so> <addr|符号> [len]      单函数控制流图（基本块 + 分支边，默认按符号 size 或首个 ret 截断）
+  cfg <so> <addr|符号> [len]      单函数可达控制流图（符号/len 边界内，最多 4096 字节）
   strings <so> [min_len] [grep]   字符串提取（带虚拟地址+文件偏移）
 
 addr 支持 0x 十六进制（不带 0x 也按十六进制解析）或符号名；len 按十进制。
@@ -23,6 +23,7 @@ import re
 import sys
 import json
 import shutil
+import tempfile
 
 try:
     from elftools.elf.elffile import ELFFile
@@ -53,7 +54,7 @@ RELATIVE_TYPE = {
     "EM_AARCH64": 1027,
     "EM_X86_64": 8,
     "EM_ARM": 23,
-    "EM_386": 42,
+    "EM_386": 8,
 }
 
 MACHINE_LABEL = {
@@ -99,15 +100,35 @@ class SoCtx:
         self.elf = ELFFile(self.f)
         self.machine = self.elf.header["e_machine"]
         self.bits = self.elf.elfclass
-        # 可加载节缓存: [(addr, size, file_off, name, flags)]
+        self.file_size = os.fstat(self.f.fileno()).st_size
+        self.loads = []
+        for seg in self.elf.iter_segments():
+            if seg["p_type"] != "PT_LOAD":
+                continue
+            size = min(seg["p_filesz"], self.file_size - seg["p_offset"])
+            if size <= 0:
+                continue
+            flags = SHF_ALLOC
+            if seg["p_flags"] & PF_W:
+                flags |= SHF_WRITE
+            if seg["p_flags"] & PF_X:
+                flags |= SHF_EXECINSTR
+            self.loads.append((seg["p_vaddr"], size, seg["p_offset"], "LOAD", flags))
+        self.loads.sort()
         self.maps = []
         for sec in self.elf.iter_sections():
             fl = sec["sh_flags"]
-            if fl & SHF_ALLOC and sec["sh_size"] > 0:
-                self.maps.append((sec["sh_addr"], sec["sh_size"], sec["sh_offset"], sec.name, fl))
+            if not fl & SHF_ALLOC or sec["sh_type"] == "SHT_NOBITS":
+                continue
+            start = sec["sh_addr"]
+            for base, size, off, _, _flags in self.loads:
+                lo, hi = max(start, base), min(start + sec["sh_size"], base + size)
+                sec_off = sec["sh_offset"] + lo - start
+                if lo < hi and sec_off == off + lo - base:
+                    self.maps.append((lo, hi - lo, sec_off, sec.name, fl))
         # 回退：加固 SO 常抹掉/伪造节区表（SHF_EXECINSTR 缺失 → is_exec 恒 False，
         # disasm/strings 全废）。此时改由程序头 PT_LOAD 段重建映射，p_flags 映射到
-        # SHF_* 语义（PF_X→EXECINSTR / PF_W→WRITE / PF_R→ALLOC），节名统一记 "LOAD"。
+        # SHF_* 语义（PF_X→EXECINSTR / PF_W→WRITE / PT_LOAD→ALLOC），节名统一记 "LOAD"。
         if not any(m[4] & SHF_EXECINSTR for m in self.maps):
             self._build_maps_from_segments()
         # 符号表: {name: (addr, size)} 与按地址排序的 [(addr, size, name)]
@@ -117,23 +138,7 @@ class SoCtx:
 
     def _build_maps_from_segments(self):
         """节区表不可信时，按 PT_LOAD 程序头重建 vaddr→file_off 映射。"""
-        segs = []
-        for seg in self.elf.iter_segments():
-            if seg["p_type"] != "PT_LOAD" or seg["p_filesz"] == 0:
-                continue
-            flags = 0
-            pf = seg["p_flags"]
-            if pf & PF_R:
-                flags |= SHF_ALLOC
-            if pf & PF_W:
-                flags |= SHF_WRITE
-            if pf & PF_X:
-                flags |= SHF_EXECINSTR
-            segs.append((seg["p_vaddr"], seg["p_filesz"], seg["p_offset"], "LOAD", flags))
-        # PT_LOAD 段按 vaddr 升序排列，便于 find() 命中
-        segs.sort(key=lambda m: m[0])
-        if segs:
-            self.maps = segs
+        self.maps = list(self.loads)
 
     def _load_symbols(self):
         seen = set()
@@ -170,9 +175,11 @@ class SoCtx:
         return m is not None and (m[4] & SHF_EXECINSTR) != 0
 
     def read(self, vaddr: int, size: int) -> bytes:
-        off, _ = self.vaddr_to_off(vaddr)
-        if off is None:
+        m = self.find(vaddr)
+        if m is None or size <= 0:
             return b""
+        off = m[2] + vaddr - m[0]
+        size = min(size, m[0] + m[1] - vaddr, self.file_size - off)
         self.f.seek(off)
         return self.f.read(size)
 
@@ -311,12 +318,20 @@ def _collect_relative(ctx):
     if rtype is None:
         return None
     out = {}
+    slot = ctx.bits // 8
+    byteorder = "little" if ctx.elf.little_endian else "big"
     for sec in ctx.elf.iter_sections():
-        if not isinstance(sec, RelocationSection) or not sec.is_RELA():
+        if not isinstance(sec, RelocationSection):
             continue
         for rel in sec.iter_relocations():
-            if rel["r_info_type"] == rtype:
+            if rel["r_info_type"] != rtype:
+                continue
+            if sec.is_RELA():
                 out[rel["r_offset"]] = rel["r_addend"]
+            else:
+                raw = ctx.read(rel["r_offset"], slot)
+                if len(raw) == slot:
+                    out[rel["r_offset"]] = int.from_bytes(raw, byteorder)
     return out
 
 
@@ -356,7 +371,7 @@ def cmd_jni(args):
         if ctx.elf.header["e_type"] != "ET_EXEC":
             sys.exit("✗ 未找到 RELATIVE 重定位，无法扫描")
         import struct
-        fmt = "<Q" if ctx.bits == 64 else "<I"
+        fmt = ("<" if ctx.elf.little_endian else ">") + ("Q" if ctx.bits == 64 else "I")
         for m in cand:
             base, size, off, name, _ = m
             ctx.f.seek(off)
@@ -373,10 +388,11 @@ def cmd_jni(args):
                  "  建议先 so_symbols 查 Java_ 前缀导出；加固 so 可查 so_info 依赖与节区是否异常。")
 
     print("✓ RegisterNatives 动态注册（%d 个，扫描 .data.rel.ro/.data 三连指针槽）:" % len(hits))
-    for nm, sig, fn in hits:
+    for nm, sig, fn, thumb in hits:
         sym, off2 = ctx.symbolize(fn)
         where = sym if (sym and off2 == 0) else ((sym + "+0x%x" % off2) if sym else "")
-        print("  %-28s %-28s → 0x%08x %s" % (nm, sig, fn, ("(%s)" % where) if where else ""))
+        mode = " [Thumb]" if thumb else ""
+        print("  %-28s %-28s → 0x%08x%s %s" % (nm, sig, fn, mode, ("(%s)" % where) if where else ""))
     print("提示: fn 地址可直接作为 patch_so 的 address 参数（RET 置零类补丁同静态注册一致）。")
 
 
@@ -385,15 +401,17 @@ def _try_jni_entry(ctx, p_name, p_sig, p_fn, hits):
     if p_name == p_sig or p_name == p_fn or p_sig == p_fn:
         return False
     name = ctx.read_cstr(p_name)
-    if not name or len(name) > 128 or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+    if not name or len(name) > 128 or not re.fullmatch(r"[A-Za-z_$][A-Za-z0-9_$]*", name):
         return False
-    sig = ctx.read_cstr(p_sig, 64)
-    # JNI 方法签名: "(" 参数 ")" 返回类型，字符集受限
-    if not sig or not re.fullmatch(r"\([ZBCSIJFDLV\[]*\)(V|[ZBCSIJFDL\[])", sig):
+    sig = ctx.read_cstr(p_sig, MAX_DISASM)
+    field = r"\[{0,255}(?:[ZBCSIJFD]|L[^.;\[/()\s]+(?:/[^.;\[/()\s]+)*;)"
+    if not sig or not re.fullmatch(r"\((?:%s)*\)(?:V|%s)" % (field, field), sig):
         return False
-    if not ctx.is_exec(p_fn):
+    thumb = ctx.machine == "EM_ARM" and bool(p_fn & 1)
+    fn_addr = p_fn & ~1 if thumb else p_fn
+    if not ctx.is_exec(fn_addr):
         return False
-    hits.append((name, sig, p_fn))
+    hits.append((name, sig, fn_addr, thumb))
     return True
 
 
@@ -426,11 +444,13 @@ def cmd_disasm(args):
         sys.exit("✗ 长度超限: %d（1-%d 字节）" % (size, MAX_DISASM))
 
     addr, label = _resolve_addr(ctx, target)
+    md = _make_disassembler(ctx, addr)
+    if ctx.machine == "EM_ARM":
+        addr &= ~1
     if not ctx.is_exec(addr):
         sec = ctx.find(addr)
         sys.exit("✗ 0x%x 不在可执行节（落在 %s）。请核对地址或用 so_symbols 查符号。" % (addr, sec[3] if sec else "未映射区域"))
 
-    md = _make_disassembler(ctx)
     code = ctx.read(addr, size)
     if not code:
         sys.exit("✗ 读取 0x%x 处 %d 字节失败（节边界溢出？）" % (addr, size))
@@ -459,16 +479,17 @@ def cmd_disasm(args):
     print("提示: 可用 patch_so 在任意上述地址打 asm/hex 补丁。")
 
 
-def _make_disassembler(ctx):
+def _make_disassembler(ctx, addr=0):
+    endian = capstone.CS_MODE_LITTLE_ENDIAN if ctx.elf.little_endian else capstone.CS_MODE_BIG_ENDIAN
     if ctx.machine == "EM_AARCH64":
-        return capstone.Cs(capstone.CS_ARCH_ARM64, capstone.CS_MODE_LITTLE_ENDIAN)
+        return capstone.Cs(capstone.CS_ARCH_ARM64, endian)
     if ctx.machine == "EM_X86_64":
         return capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
     if ctx.machine == "EM_386":
         return capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_32)
     if ctx.machine == "EM_ARM":
-        # ARM32 Thumb 位由地址 bit0 决定，交给 symbolize/调用方保证对齐
-        return capstone.Cs(capstone.CS_ARCH_ARM, capstone.CS_MODE_LITTLE_ENDIAN)
+        mode = capstone.CS_MODE_THUMB if addr & 1 else capstone.CS_MODE_ARM
+        return capstone.Cs(capstone.CS_ARCH_ARM, mode | endian)
     sys.exit("✗ 暂不支持反汇编该架构: %s" % ctx.machine)
 
 
@@ -510,131 +531,138 @@ def cmd_strings(args):
     print("\n".join(lines))
 
 
-# 无条件跳转 / 返回类助记符（划分块尾 + 终止后继）
-_JUMP_MN = {"b", "br", "jmp", "ret", "retq", "bx", "brk"}
+# 无条件跳转助记符
+_JUMP_MN = {"b", "b.al", "b.nv", "br", "jmp", "ljmp", "bx"}
 # 条件分支助记符（块尾 + 条件后继 + fallthrough 后继）
 _COND_MN = {
     "b.eq", "b.ne", "b.cs", "b.hs", "b.cc", "b.lo", "b.mi", "b.pl", "b.vs", "b.vc",
-    "b.hi", "b.ls", "b.ge", "b.lt", "b.gt", "b.le", "b.al", "b.nv",
+    "b.hi", "b.ls", "b.ge", "b.lt", "b.gt", "b.le",
     "cbz", "cbnz", "tbz", "tbnz",
     "je", "jne", "jz", "jnz", "jg", "jge", "jl", "jle", "ja", "jae", "jb", "jbe",
     "jo", "jno", "js", "jns", "jp", "jpe", "jnp", "jpo", "jc", "jcxz", "jecxz", "jrcxz",
     "beq", "bne", "bcs", "bhs", "bcc", "blo", "bmi", "bpl", "bvs", "bvc",
     "bhi", "bls", "bge", "blt", "bgt", "ble",
 }
-# 调用类（作为块尾边界但不改控制流，尾调用除外）
-_CALL_MN = {"bl", "blr", "call", "callq"}
+# 调用目标不属于本函数 CFG
+_CALL_MN = {"bl", "blx", "blr", "call", "callq"}
+
+
+def _flow_kind(insn):
+    mn = insn.mnemonic
+    if isinstance(mn, bytes):
+        mn = mn.decode("utf-8", "replace")
+    mn = mn.removesuffix(".w").removesuffix(".n")
+    if mn in _COND_MN or mn in ("loop", "loope", "loopne"):
+        return "cond"
+    if mn in _JUMP_MN:
+        return "branch"
+    if mn in _CALL_MN:
+        return "call"
+    if mn in ("ret", "retq", "retf", "iret", "iretq", "brk", "ud2", "hlt"):
+        return "stop"
+    if mn == "pop" and any(
+        op.type == capstone.CS_OP_REG and insn.reg_name(op.reg) == "pc" for op in insn.operands
+    ):
+        return "stop"
+    if mn in ("pop", "ldm", "ldmia", "ldmdb") and any(op.type == capstone.CS_OP_REG and insn.reg_name(op.reg) == "pc" for op in insn.operands):
+        return "stop"
+    if capstone.CS_GRP_CALL in insn.groups:
+        return "call"
+    if capstone.CS_GRP_RET in insn.groups or capstone.CS_GRP_IRET in insn.groups:
+        return "stop"
+    if capstone.CS_GRP_JUMP in insn.groups:
+        return "cond"
+    return None
 
 
 def _branch_target(insn, machine):
-    """提取分支指令的绝对跳转目标地址；无则返回 None。
-
-    capstone 对 ARM64/ARM 的 b/cbz 等给出 IMM 操作数（绝对地址），
-    对 x86 的 jmp/je 给出相对偏移（imm 是相对值），需用 size+address 校正为绝对地址。
-    统一用通用常量 CS_OP_IMM 判断操作数类型，避免依赖 capstone.arm64/x86 子模块
-    （Debian apt 打包的 python3-capstone 可能裁剪这些子模块导入）。
-    """
-    if not insn.operands:
+    if _flow_kind(insn) not in ("branch", "cond", "call") or not insn.operands:
         return None
-    op0 = insn.operands[0]
-    if op0.type != capstone.CS_OP_IMM:
-        return None
-    if machine in ("EM_X86_64", "EM_386"):
-        # x86 相对跳转：目标 = 下一条指令地址 + imm
-        return insn.address + insn.size + op0.imm
-    return op0.imm
+    op = insn.operands[-1]
+    return op.imm if op.type == capstone.CS_OP_IMM else None
 
 
 def _build_cfg(ctx, addr, size_hint):
-    """线性反汇编函数体，产出基本块与边。
-
-    返回 (blocks, edges)：
-      blocks = [(id, start_addr, end_addr, insns)]  insns 为 [(addr, mnemonic, op_str)]
-      edges  = [(from_id, to_id, kind)]  kind: 'fall'/'branch'/'cond'
-    """
-    md = _make_disassembler(ctx)
+    if size_hint < 0 or size_hint > MAX_DISASM:
+        sys.exit("✗ 长度超限: %d（1-%d 字节）" % (size_hint, MAX_DISASM))
+    md = _make_disassembler(ctx, addr)
     md.detail = True
-    # 符号有 size 时精确限定；否则按 size_hint，再截到首个 ret
-    end = addr + size_hint if size_hint else None
-    sym, _ = ctx.symbolize(addr)
-    if sym:
-        s_addr, s_size = ctx.sym_by_name.get(sym, (addr, 0))
-        if s_size:
-            end = s_addr + s_size
-
-    code = ctx.read(addr, max(end - addr, 64) if end else 64)
+    thumb = ctx.machine == "EM_ARM" and bool(addr & 1)
+    if ctx.machine == "EM_ARM":
+        addr &= ~1
+    end = addr + (size_hint or MAX_DISASM)
+    for start, size, _name in ctx.sym_by_addr:
+        if ctx.machine == "EM_ARM":
+            start &= ~1
+        if start > addr:
+            end = min(end, start)
+        elif size and addr < start + size:
+            end = min(end, start + size)
+    m = ctx.find(addr)
+    if m:
+        end = min(end, m[0] + m[1])
+    code = ctx.read(addr, end - addr)
     if not code:
         sys.exit("✗ 读取 0x%x 处代码失败" % addr)
-    if end:
-        code = code[:end - addr]
-
-    insns = []          # 线性反汇编全部指令
-    leaders = {0}       # 基本块起始的 code offset（相对 addr）
-    for insn in md.disasm(code, addr):
-        off = insn.address - addr
-        mn = insn.mnemonic
-        if isinstance(mn, bytes):
-            mn = mn.decode("utf-8", "replace")
-        op_str = insn.op_str
-        if isinstance(op_str, bytes):
-            op_str = op_str.decode("utf-8", "replace")
-        insns.append((insn.address, mn, op_str, insn))
-        # 分支目标作为新的 leader
-        t = _branch_target(insn, ctx.machine)
-        if t is not None:
-            toff = t - addr
-            if 0 <= toff < len(code):
-                leaders.add(toff)
-        # 分支/返回/调用后的下一条指令是新块起始
-        if mn in _JUMP_MN or mn in _COND_MN or mn in _CALL_MN:
-            nxt = off + insn.size
-            if nxt < len(code):
-                leaders.add(nxt)
-        # 无条件跳转/返回终止线性扫描（后面是另一个函数或数据）
-        if mn in _JUMP_MN and mn not in _COND_MN:
-            break
-
+    end = addr + len(code)
+    pending, leaders, insns = [addr], {addr}, {}
+    while pending:
+        start = pending.pop()
+        if start in insns:
+            continue
+        for insn in md.disasm(code[start - addr:], start):
+            if insn.address in insns or insn.address + insn.size > end:
+                break
+            mn, op = insn.mnemonic, insn.op_str
+            if isinstance(mn, bytes):
+                mn = mn.decode("utf-8", "replace")
+            if isinstance(op, bytes):
+                op = op.decode("utf-8", "replace")
+            insns[insn.address] = (insn.address, mn, op, insn)
+            kind = _flow_kind(insn)
+            if kind in ("branch", "cond"):
+                t = _branch_target(insn, ctx.machine)
+                if t is not None and thumb:
+                    t &= ~1
+                successors = [t]
+                if kind == "cond":
+                    successors.append(insn.address + insn.size)
+                for successor in successors:
+                    if successor is not None and addr <= successor < end:
+                        leaders.add(successor)
+                        if successor not in insns:
+                            pending.append(successor)
+                break
+            if kind == "stop":
+                break
     if not insns:
         sys.exit("✗ 0x%x 处反汇编无结果" % addr)
 
-    # 按 leader 切块
-    leaders_sorted = sorted(leaders)
-    block_ranges = []
-    for i, lo in enumerate(leaders_sorted):
-        hi = leaders_sorted[i + 1] if i + 1 < len(leaders_sorted) else (insns[-1][0] - addr + insns[-1][3].size)
-        block_ranges.append((lo, hi))
-
-    blocks = []
-    block_of = {}   # code offset -> block id
-    for bid, (lo, hi) in enumerate(block_ranges):
-        body = [(a, mn, os_, ins) for a, mn, os_, ins in insns if lo <= (a - addr) < hi]
-        if not body:
-            continue
-        end_addr = body[-1][0] + body[-1][3].size
-        blocks.append((bid, body[0][0], end_addr, body))
-        for a, _, _, _ in body:
-            block_of[a - addr] = bid
-
-    # 建边
+    bodies = []
+    for address in sorted(insns):
+        item = insns[address]
+        if not bodies or address in leaders or bodies[-1][-1][0] + bodies[-1][-1][3].size != address or _flow_kind(bodies[-1][-1][3]) in ("branch", "cond", "stop"):
+            bodies.append([])
+        bodies[-1].append(item)
+    blocks, block_of = [], {}
+    for bid, body in enumerate(bodies):
+        blocks.append((bid, body[0][0], body[-1][0] + body[-1][3].size, body))
+        for address, *_rest in body:
+            block_of[address] = bid
     edges = []
-    for bid, lo, hi in [(i, r[0], r[1]) for i, r in enumerate(block_ranges)]:
-        body = [(a, mn, os_, ins) for a, mn, os_, ins in insns if lo <= (a - addr) < hi]
-        if not body:
-            continue
-        last_insn = body[-1][3]
-        mn = body[-1][1]
-        t = _branch_target(last_insn, ctx.machine)
-        # fallthrough
-        if mn not in _JUMP_MN:
-            nxt = last_insn.address + last_insn.size - addr
+    for bid, _start, _end, body in blocks:
+        insn = body[-1][3]
+        kind = _flow_kind(insn)
+        if kind not in ("branch", "stop"):
+            nxt = insn.address + insn.size
             if nxt in block_of:
-                edges.append((bid, block_of[nxt], "cond" if mn in _COND_MN else "fall"))
-        # 分支目标
-        if t is not None:
-            toff = t - addr
-            if toff in block_of:
-                edges.append((bid, block_of[toff], "cond" if mn in _COND_MN else "branch"))
-
+                edges.append((bid, block_of[nxt], "cond" if kind == "cond" else "fall"))
+        if kind in ("branch", "cond"):
+            t = _branch_target(insn, ctx.machine)
+            if t is not None and thumb:
+                t &= ~1
+            if t in block_of:
+                edges.append((bid, block_of[t], "cond" if kind == "cond" else "branch"))
     return blocks, edges
 
 
@@ -644,13 +672,17 @@ def cmd_cfg(args):
     ctx = SoCtx(so_path(args[0]))
     target = args[1]
     size_hint = parse_len(args[2]) if len(args) > 2 else 0
+    if len(args) > 2 and not 1 <= size_hint <= MAX_DISASM:
+        sys.exit("✗ 长度超限: %d（1-%d 字节）" % (size_hint, MAX_DISASM))
 
     addr, label = _resolve_addr(ctx, target)
-    if not ctx.is_exec(addr):
-        sec = ctx.find(addr)
+    code_addr = addr & ~1 if ctx.machine == "EM_ARM" else addr
+    if not ctx.is_exec(code_addr):
+        sec = ctx.find(code_addr)
         sys.exit("✗ 0x%x 不在可执行节（落在 %s）。请核对地址或用 so_symbols 查符号。" % (addr, sec[3] if sec else "未映射区域"))
 
     blocks, edges = _build_cfg(ctx, addr, size_hint)
+    addr = code_addr
 
     where = ("(%s)" % label) if label else ""
     print("✓ 控制流图 %s @ 0x%x %s（%d 个基本块，%d 条边）:" % (
@@ -777,7 +809,7 @@ def cmd_patch(args):
     在 SO 上打字节补丁（虚拟地址自动换算文件偏移，复用 SoCtx 的 PT_LOAD 回退，
     加固 so 也能定位）。默认先写 .orig 备份（幂等，仅首次）：
       <so>.orig   —— 首次 patch 前的原始字节，供回滚（patch --restore <so>）
-    多个补丁项以冒号续接；--dry 只显示将改动的内容，不落盘。
+    多个补丁项可重复传参或以冒号续接；--dry 只显示将改动的内容，不落盘。
     """
     # 回滚分支: patch <so> --restore
     if "--restore" in args[1:]:
@@ -789,20 +821,18 @@ def cmd_patch(args):
     if not specs:
         sys.exit("✗ 缺少补丁项（地址:hex字节）")
     dry = "--dry" in args[1:]
-    patches = [_parse_patch_arg(sp) for sp in specs]
+    patches = []
+    for spec in specs:
+        parts = spec.split(":")
+        if len(parts) < 2 or len(parts) % 2:
+            sys.exit("✗ 补丁项格式错误: %r（地址:hex字节，可重复或用冒号续接）" % spec)
+        patches.extend(_parse_patch_arg(":".join(parts[i:i + 2])) for i in range(0, len(parts), 2))
 
     ctx = SoCtx(path)
-
-    # 统一先换算并校验，全部通过才动文件
-    plan = []
-    for addr, data in patches:
-        off, sec = ctx.vaddr_to_off(addr)
-        if off is None:
-            sys.exit("✗ 0x%x 不在任何可加载节（加固 SO 已按 PT_LOAD 重建映射，仍找不到）" % addr)
-        old = ctx.read(addr, len(data))
-        if len(old) != len(data):
-            sys.exit("✗ 0x%x 读取 %d 字节失败（节边界溢出）" % (addr, len(data)))
-        plan.append((addr, off, old, data, sec))
+    try:
+        plan = prepare_patches(ctx, patches)
+    finally:
+        ctx.f.close()
 
     # 展示计划
     print("补丁计划（%s）:" % ("DRY" if dry else "将写入"))
@@ -817,24 +847,149 @@ def cmd_patch(args):
         print("（--dry，未写盘）")
         _finish(0)
 
-    # 备份（幂等：只在首次打补丁时留 .orig；之后补丁的基线始终是 .orig）
-    orig = path + ".orig"
-    if not os.path.isfile(orig):
-        shutil.copyfile(path, orig)
-        print("✓ 已备份原始文件 → %s" % orig)
-
-    # 写盘（r+ 定位写，不整文件重写）
-    with open(path, "r+b") as f:
-        for addr, off, old, data, sec in plan:
-            f.seek(off)
-            f.write(data)
+    rid = apply_patches(path, plan)
     print("✓ 已写入 %d 处补丁 → %s" % (len(plan), path))
-    try:
-        rid = _record_patch(path, plan)
-        print("✓ 已记入补丁柜：%s（patch-list 查看 / patch-status 改状态 / patch-rollback 回滚）" % rid)
-    except Exception as e:
-        print("⚠ 补丁柜记录失败（不影响补丁本身）: %s" % e)
+    print("✓ 已记入补丁柜：%s（patch-list 查看 / patch-status 改状态 / patch-rollback 回滚）" % rid)
     _finish(0)
+
+
+def prepare_patches(ctx, patches):
+    if not patches:
+        sys.exit("✗ 补丁内容为空")
+    plan = []
+    for addr, data in patches:
+        if addr < 0 or not data:
+            sys.exit("✗ 补丁地址或内容无效")
+        if ctx.machine == "EM_AARCH64" and (addr % 4 or len(data) % 4):
+            sys.exit("✗ arm64 地址必须 4 字节对齐，补丁长度必须是 4 的倍数")
+        off, sec = ctx.vaddr_to_off(addr)
+        if off is None:
+            sys.exit("✗ 0x%x 不在任何文件支持的可加载范围" % addr)
+        old = ctx.read(addr, len(data))
+        if off < 0 or off + len(data) > ctx.file_size or len(old) != len(data):
+            sys.exit("✗ 0x%x 读取 %d 字节失败（可加载范围溢出）" % (addr, len(data)))
+        plan.append((addr, off, old, data, sec))
+    for index in (0, 1):
+        ranges = sorted((p[index], p[index] + len(p[3])) for p in plan)
+        if any(end > start for (_lo, end), (start, _hi) in zip(ranges, ranges[1:])):
+            sys.exit("✗ 补丁项范围重叠")
+    return plan
+
+
+def _fsync_directory(path):
+    descriptor = None
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        os.fsync(descriptor)
+    except OSError:
+        pass
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def _atomic_copy(source, target, keep_existing=False):
+    directory = os.path.dirname(target) or "."
+    descriptor, temporary = tempfile.mkstemp(prefix=".%s." % os.path.basename(target),
+                                             suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(descriptor, "wb") as dst, open(source, "rb") as src:
+            shutil.copyfileobj(src, dst, 1024 * 1024)
+            dst.flush()
+            os.fsync(dst.fileno())
+        shutil.copystat(source, temporary)
+        if keep_existing and os.path.exists(target):
+            return False
+        os.replace(temporary, target)
+        _fsync_directory(directory)
+        return True
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def _atomic_write_json(path, value):
+    directory = os.path.dirname(path) or "."
+    descriptor, temporary = tempfile.mkstemp(prefix=".%s." % os.path.basename(path),
+                                             suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(value, stream, ensure_ascii=False, indent=1)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        _fsync_directory(directory)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def _set_record_status(rid, status, note=""):
+    rec, path = _load_record(rid)
+    if not rec:
+        return
+    rec["status"] = status
+    rec["note"] = note
+    try:
+        _atomic_write_json(path, rec)
+    except OSError:
+        pass
+
+
+def apply_patches(path, plan, out_path=None):
+    source = os.path.realpath(path)
+    target = os.path.realpath(out_path or path)
+    with open(source, "rb") as f:
+        for _addr, off, old, _data, _sec in plan:
+            f.seek(off)
+            if f.read(len(old)) != old:
+                sys.exit("✗ 源文件已改变，请重新生成补丁计划")
+    target_plan = plan
+    if target != source and os.path.exists(target):
+        target_plan = []
+        with open(target, "rb") as f:
+            for addr, off, _old, data, sec in plan:
+                f.seek(off)
+                old = f.read(len(data))
+                if len(old) != len(data):
+                    sys.exit("✗ 输出目标过短，无法记录原字节")
+                target_plan.append((addr, off, old, data, sec))
+    directory = os.path.dirname(target)
+    if not os.path.isdir(directory):
+        sys.exit("✗ 输出目录不存在: %s" % directory)
+    baseline = target if os.path.isfile(target) else source
+    orig, bak = target + ".orig", target + ".bak"
+    _atomic_copy(baseline, orig, keep_existing=True)
+    _atomic_copy(baseline, bak)
+    rid = _record_patch(target, target_plan, status="pending")
+    descriptor, temporary = tempfile.mkstemp(prefix=".%s." % os.path.basename(target),
+                                             suffix=".patch", dir=directory)
+    os.close(descriptor)
+    try:
+        shutil.copyfile(source, temporary)
+        shutil.copystat(source, temporary)
+        with open(temporary, "r+b") as f:
+            for _addr, off, _old, data, _sec in plan:
+                f.seek(off)
+                if f.write(data) != len(data):
+                    raise OSError("补丁写入不完整")
+            f.flush()
+            os.fsync(f.fileno())
+        with open(temporary, "rb") as f:
+            for _addr, off, _old, data, _sec in plan:
+                f.seek(off)
+                if f.read(len(data)) != data:
+                    raise OSError("写入校验失败")
+        os.replace(temporary, target)
+        _fsync_directory(directory)
+        _set_record_status(rid, "active")
+        return rid
+    except (OSError, SystemExit) as error:
+        _set_record_status(rid, "failed", str(error)[:300])
+        raise
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 # ============================================================ 补丁柜（/root/patches/，持久 bind）
@@ -851,18 +1006,25 @@ def _cabinet_dir_for(so_path: str) -> str:
     return d
 
 
-def _record_patch(so_path: str, patches: list) -> str:
+def _record_patch(so_path: str, patches: list, status="active") -> str:
     """patch 成功写入后调用：一次记录一条 JSON（一个补丁批次）。返回记录 id。"""
     import time as _t
     ts = _t.strftime("%Y%m%d_%H%M%S")
     d = _cabinet_dir_for(so_path)
-    rid = "%s_%s" % (ts, ("_".join("%x" % a for a, *_ in patches[:2]))[:24])
+    import uuid
+    so_path = os.path.realpath(so_path)
+    prefix = "%s_%s" % (ts, ("_".join("%x" % a for a, *_ in patches[:2]))[:24])
+    while True:
+        rid = prefix + "_" + uuid.uuid4().hex[:12]
+        path = os.path.join(d, rid + ".json")
+        if not os.path.exists(path):
+            break
     rec = {
         "id": rid,
         "so": so_path,
         "orig": so_path + ".orig",
         "time": _t.strftime("%Y-%m-%d %H:%M:%S"),
-        "status": "active",
+        "status": status,
         "note": "",
         "patches": [
             {"addr": "0x%x" % a, "offset": "0x%x" % o,
@@ -870,8 +1032,7 @@ def _record_patch(so_path: str, patches: list) -> str:
             for a, o, old, dat, _sec in patches
         ],
     }
-    with open(os.path.join(d, rid + ".json"), "w", encoding="utf-8") as f:
-        json.dump(rec, f, ensure_ascii=False, indent=1)
+    _atomic_write_json(path, rec)
     return rid
 
 
@@ -888,12 +1049,15 @@ def _load_record(rid_or_path: str):
                     hits.append(cand)
         if not hits:
             return None, None
+        if len(hits) != 1:
+            sys.exit("✗ 补丁记录 id 有歧义: %s（请传完整 JSON 路径）" % rid_or_path)
         p = hits[0]
     if not os.path.isfile(p):
         return None, None
     try:
-        return json.load(open(p, encoding="utf-8")), p
-    except Exception:
+        with open(p, encoding="utf-8") as f:
+            return json.load(f), p
+    except (OSError, ValueError):
         return None, None
 
 
@@ -946,41 +1110,61 @@ def cmd_patch_status(args):
     rec["status"] = st
     if len(args) > 2:
         rec["note"] = args[2]
-    json.dump(rec, open(path, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+    _atomic_write_json(path, rec)
     print("✓ %s 状态 → %s%s" % (rec["id"], st, ("（" + rec["note"] + "）") if rec.get("note") else ""))
     _finish(0)
 
 
+def _cabinet_records():
+    if not os.path.isdir(PATCH_CABINET_DIR):
+        return
+    for sub in sorted(os.listdir(PATCH_CABINET_DIR)):
+        sdir = os.path.join(PATCH_CABINET_DIR, sub)
+        if not os.path.isdir(sdir):
+            continue
+        for fn in sorted(os.listdir(sdir)):
+            if fn.endswith(".json"):
+                rec, path = _load_record(os.path.join(sdir, fn))
+                if rec:
+                    yield rec, path
+
+
+def _clear_records_for(target):
+    target = os.path.realpath(target)
+    dirs = set()
+    for rec, path in list(_cabinet_records()):
+        if rec.get("so") and os.path.realpath(rec["so"]) == target:
+            os.remove(path)
+            dirs.add(os.path.dirname(path))
+    for directory in dirs:
+        if not os.listdir(directory):
+            os.rmdir(directory)
+
+
 def cmd_patch_rollback(args):
-    """patch-rollback <记录id|all>   按记录回滚（恢复 .orig 到 so，并清全部该 so 的记录）"""
+    """patch-rollback <记录id|all>   恢复 .orig，仅清同一目标路径的记录。"""
     if args[0] == "all":
-        # 回滚所有记录涉及的 so（按 .orig 恢复，清记录）
         if not os.path.isdir(PATCH_CABINET_DIR):
             sys.exit("✗ 补丁柜为空")
-        dones = set()
-        for sub in os.listdir(PATCH_CABINET_DIR):
-            sdir = os.path.join(PATCH_CABINET_DIR, sub)
-            for fn in os.listdir(sdir):
-                rec, p = _load_record(os.path.join(sdir, fn))
-                if rec and rec["so"] not in dones:
-                    orig = rec["orig"]
-                    if os.path.isfile(orig):
-                        shutil.copyfile(orig, rec["so"])
-                        shutil.rmtree(sdir, ignore_errors=True)
-                        print("✓ 已回滚 %s（清 %s）" % (rec["so"], sub))
-                        dones.add(rec["so"])
-        print("完成，共回滚 %d 个 so" % len(dones))
-        _finish(0)
-    rec, path = _load_record(args[0])
-    if not rec:
-        sys.exit("✗ 找不到补丁记录: %s" % args[0])
-    orig = rec["orig"]
-    if not os.path.isfile(orig):
-        sys.exit("✗ .orig 备份不存在: %s（无法回滚）" % orig)
-    shutil.copyfile(orig, rec["so"])
-    sdir = os.path.dirname(path)
-    shutil.rmtree(sdir, ignore_errors=True)
-    print("✓ 已回滚 %s ← %s（补丁记录已清：%s）" % (rec["so"], orig, sdir))
+        targets = {}
+        for rec, _path in list(_cabinet_records()):
+            targets.setdefault(os.path.realpath(rec["so"]), rec["orig"])
+    else:
+        rec, _path = _load_record(args[0])
+        if not rec:
+            sys.exit("✗ 找不到补丁记录: %s" % args[0])
+        targets = {os.path.realpath(rec["so"]): rec["orig"]}
+    for orig in targets.values():
+        if not os.path.isfile(orig):
+            sys.exit("✗ .orig 备份不存在: %s（无法回滚）" % orig)
+    done = 0
+    for target, orig in targets.items():
+        _atomic_copy(orig, target)
+        _clear_records_for(target)
+        print("✓ 已回滚 %s ← %s（该目标补丁记录已清）" % (target, orig))
+        done += 1
+    if args[0] == "all":
+        print("完成，共回滚 %d 个 so" % done)
     _finish(0)
 
 
@@ -998,19 +1182,19 @@ def cmd_patch_delete(args):
 
 
 def cmd_patch_restore(args):
-    """用法: patch --restore <so>   （从 .orig 恢复并删除备份）"""
+    """用法: patch <so> --restore   （从 .orig 恢复并清该目标记录）"""
     path = so_path(args[0])
     orig = path + ".orig"
     if not os.path.isfile(orig):
         sys.exit("✗ 无备份可恢复: %s 不存在（该文件从未打过补丁？）" % orig)
-    shutil.copyfile(orig, path)
-    os.remove(orig)
-    print("✓ 已从 %s 恢复 %s（备份已清）" % (orig, path))
+    _atomic_copy(orig, path)
+    _clear_records_for(path)
+    print("✓ 已从 %s 恢复 %s（该目标补丁记录已清，备份保留）" % (orig, path))
     _finish(0)
 
 
 COMMANDS = {
-    "patch": (cmd_patch, 2, "<so> <addr:hex>[:addr:hex...] [--dry]"),
+    "patch": (cmd_patch, 2, "<so> <addr:hex>[:addr:hex...] [<addr:hex>...] [--dry]"),
     "patch-list": (cmd_patch_list, 0, "[so文件名]"),
     "patch-read": (cmd_patch_read, 1, "<记录id>"),
     "patch-status": (cmd_patch_status, 2, "<记录id> <active|broken|superseded|failed> [备注]"),

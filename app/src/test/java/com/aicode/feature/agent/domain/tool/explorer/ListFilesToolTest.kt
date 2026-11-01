@@ -32,12 +32,14 @@ class ListFilesToolTest {
         FileEntry(".hidden", isDirectory = false, size = 5, lastModified = 500)
     )
 
+    private val fileTime = 1_700_000_000_000L
+    private val apk = "$dir/123云盘 3.3.0.apk"
     private val tool = ListFilesTool(FakeFileAccess())
 
     private inner class FakeFileAccess : FileAccessProvider {
-        override fun exists(path: String): Boolean = path == dir
-        override fun isDirectory(path: String): Boolean = path == dir
-        override fun isFile(path: String): Boolean = path != dir
+        override fun exists(path: String): Boolean = path == dir || path == apk || path == "$dir/empty.txt"
+        override fun isDirectory(path: String): Boolean = path == dir || path == "/root/workspace"
+        override fun isFile(path: String): Boolean = exists(path) && !isDirectory(path)
         override fun listFiles(path: String): List<FileEntry> = if (path == dir) files else emptyList()
         override fun parentPath(path: String): String? = "/root/workspace"
         override fun toDisplayPath(path: String): String = path
@@ -45,9 +47,13 @@ class ListFilesToolTest {
         override fun readFile(path: String): String = throw UnsupportedOperationException()
         override fun readLines(path: String): Sequence<String> = throw UnsupportedOperationException()
         override fun writeFile(path: String, content: String, overwrite: Boolean, encoding: Charset) = throw UnsupportedOperationException()
-        override fun fileSize(path: String): Long = throw UnsupportedOperationException()
-        override fun lastModified(path: String): Long = throw UnsupportedOperationException()
-        override fun permissions(path: String): String = throw UnsupportedOperationException()
+        override fun fileSize(path: String): Long = when {
+            path == apk -> 108_967_223L
+            isDirectory(path) -> 4096L
+            else -> 0L
+        }
+        override fun lastModified(path: String): Long = fileTime
+        override fun permissions(path: String): String = if (isDirectory(path)) "rwx" else "rw-"
         override fun readBytes(path: String): ByteArray = throw UnsupportedOperationException()
         override fun writeBytes(path: String, bytes: ByteArray, overwrite: Boolean) = throw UnsupportedOperationException()
         override fun writeStream(path: String, input: InputStream, overwrite: Boolean): Long = throw UnsupportedOperationException()
@@ -78,6 +84,52 @@ class ListFilesToolTest {
     private fun truncatedOf(result: ToolResult): Boolean {
         val success = result as ToolResult.Success
         return (success.data as JsonObject)["truncated"]?.jsonPrimitive?.contentOrNull == "true"
+    }
+
+    @Test
+    fun list_singleFile_readsMetadata() = runTest {
+        val content = contentOf(runList("-l '$apk'"))
+        assertTrue(content.startsWith("-rw-------"))
+        assertTrue(content.contains("108967223"))
+        assertTrue(content.contains("123云盘 3.3.0.apk"))
+        val expectedTime = java.text.SimpleDateFormat("MMM dd HH:mm", java.util.Locale.US)
+            .format(java.util.Date(fileTime))
+        assertTrue(content.contains(expectedTime))
+    }
+
+    @Test
+    fun list_singleFile_humanSize() = runTest {
+        assertTrue(contentOf(runList("-lh '$apk'")).contains("104M"))
+    }
+
+    @Test
+    fun list_directoryOnly_preservesDirectoryMetadata() = runTest {
+        val content = contentOf(runList("-ld $dir"))
+        assertTrue(content.startsWith("drwx------"))
+        assertTrue(content.contains("4096"))
+    }
+
+    @Test
+    fun list_emptyFile_preservesZeroBytes() = runTest {
+        val content = contentOf(runList("-lh '$dir/empty.txt'"))
+        assertTrue(content.startsWith("-rw-------"))
+        assertTrue(content.contains("0B"))
+    }
+
+    @Test
+    fun list_dotEntries_readDirectoryMetadata() = runTest {
+        val content = contentOf(runList("-la $dir"))
+        val dots = content.lines().filter { it.endsWith(" .") || it.endsWith(" ..") }
+        assertEquals(2, dots.size)
+        assertTrue(dots.all { it.startsWith("drwx------") && it.contains("4096") })
+    }
+
+    @Test
+    fun list_multipleFiles_readEachMetadata() = runTest {
+        val result = runList("-l '$apk' '$dir/empty.txt'")
+        assertEquals(3, entriesOf(result))
+        assertTrue(contentOf(result).contains("108967223"))
+        assertTrue(contentOf(result).contains("empty.txt"))
     }
 
     @Test

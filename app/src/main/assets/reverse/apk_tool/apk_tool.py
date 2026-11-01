@@ -8,6 +8,7 @@
   info <apk>                          manifest 分析：包名/版本/权限/导出组件/标志
   manifest-edit <apk> <ops> <out>     编辑 manifest（ops 见下），产出未签名 APK
   dex-strings <apk> <regex>           搜全部 dex 字符串（正则，限 200 条）
+  fast-scan <apk> [keywords]          扫 libapp.so（UTF-8/UTF-16LE）和全部 DEX 字符串池
   dex-refs <apk> <regex>              搜 const-string 代码引用：谁在哪个方法加载了它
   dex-class <apk> <class>             列类的方法清单（class=Lcom/a/B; 格式）
   dex-fields <apk> <class>            列类的字段清单（static/instance、Java 类型、访问标志）
@@ -16,15 +17,18 @@
                                     offset 起始行(0起)、limit 单页行数(默认400，最大2000)
   dex-return <apk> <class> <name> <v> 原地补丁：强制方法返回 true/false/null/void
   dex-smali <apk> <class> <name> <f>  smali 文本重写方法体（整 DEX 重写，支持扩容）
-  dex-string-edit <apk> <old> <new> <out>  原地改字符串内容（等长或尾部截断补零）
+  dex-string-edit <apk> <old> <new> <out>  改字符串后重排/去重池并重映射引用（新串不可更长）
   resource-read <apk> <locator>...    按资源 locator 批量读 resources.arsc 值
   dex-xref <apk> <method|field|type> <目标>  dex 方法/字段/类引用查询（谁引用了目标）
-  rebuild <apk> <out>                 仅重打包（manifest 修改后落盘 zipaligned 未签名 APK）
+  rebuild <apk> <out> [--replace ZIP_ENTRY=FILE]...  重打包为 aligned unsigned APK
+                                    替换只接受已有条目；非压缩 SO 16 KiB，其余 stored 4 字节
 
 ops 语法（逗号分隔多个）：debuggable=1,cleartext=1,perm=android.permission.XXX
 
-安全说明：所有编辑只落盘到容器 /root/apk/ 下，签名由 Android 侧 apksig 完成。
+路径说明：APK 相对路径按 /root/apk/ 解析，替换文件按容器当前目录解析；可传绝对路径。
+签名由 Android 侧 apksig 单独完成。
 """
+import argparse
 import json
 import os
 import re
@@ -32,7 +36,7 @@ import struct
 import sys
 import zipfile
 
-sys.path.insert(0, "/root/apk-tool")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from reapk import (  # noqa: E402
     Apk, Arsc, DexFile, Interner, find_string_code_refs,
     assemble_interned, build_code_item, build_dex, compute_outs,
@@ -42,6 +46,13 @@ from reapk.dex import field_acc_str, _desc_to_java  # noqa: E402
 
 APK_DIR = "/root/apk"
 MAX_HITS = 200          # 字符串/引用搜索上限，防大 dex 刷屏
+MAX_KW_HITS = 8
+CONTEXT_BEFORE = 14
+CONTEXT_AFTER = 26
+DEFAULT_FAST_SCAN_KEYWORDS = (
+    "vip,member,premium,subscription,entitlement,unlock,paid,advert,admob,"
+    "showad,show_ad,loadad,load_ad,banner,interstitial,reward,pangle,穿山甲,优量汇"
+)
 MAX_SMALI_LINES = 400   # 反汇编单页输出上限（可用 offset/limit 分页）
 MAX_CLASS_METHODS = 300 # 类方法清单上限（防混淆大类全量刷屏）
 
@@ -141,6 +152,72 @@ def cmd_dex_strings(args):
           % (total, "，仅显示前 %d" % MAX_HITS if total > MAX_HITS else "", pat))
     print("\n".join(hits))
     print("提示: 命中后用 dex-refs 确认代码引用位置，再 dex-method 反汇编上下文。")
+
+
+def _fast_scan_pattern(keyword, encoding):
+    parts = []
+    for char in keyword:
+        variants = {char.encode(encoding), char.lower().encode(encoding), char.upper().encode(encoding)}
+        parts.append(b"(?:" + b"|".join(re.escape(v) for v in sorted(variants)) + b")")
+    return re.compile(b"".join(parts))
+
+
+def cmd_fast_scan(args):
+    p = apk_path(args[0])
+    keywords_text = args[1] if len(args) > 1 and args[1].strip() else DEFAULT_FAST_SCAN_KEYWORDS
+    keywords = list(dict.fromkeys(k.strip() for k in keywords_text.split(",") if k.strip()))
+    if not keywords:
+        sys.exit("✗ 关键词为空")
+    patterns = {kw: [(encoding, label, _fast_scan_pattern(kw, encoding)) for encoding, label in
+                     (("utf-8", "UTF-8"), ("utf-16-le", "UTF-16LE"))] for kw in keywords}
+    hits, totals, sources = {kw: [] for kw in keywords}, {kw: 0 for kw in keywords}, []
+    with zipfile.ZipFile(p) as zf:
+        for name in sorted(n for n in zf.namelist() if re.fullmatch(r"lib/[^/]+/libapp\.so", n)):
+            blob = zf.read(name)
+            sources.append(name)
+            for kw in keywords:
+                for encoding, label, pattern in patterns[kw]:
+                    for match in pattern.finditer(blob):
+                        totals[kw] += 1
+                        if len(hits[kw]) < MAX_KW_HITS:
+                            if encoding == "utf-16-le":
+                                # 二进制快照周围的随机字节常能解成貌似合法的 CJK 字符，
+                                # UTF-16 命中只显示匹配词，避免把噪声伪装成上下文。
+                                context = blob[match.start():match.end()].decode(encoding, "strict")
+                            else:
+                                lo = max(0, match.start() - CONTEXT_BEFORE)
+                                hi = min(len(blob), match.end() + CONTEXT_AFTER)
+                                context = blob[lo:hi].decode(encoding, "replace")
+                            hits[kw].append("%s %s @0x%X  %r" % (name, label, match.start(), context))
+        for name in sorted(n for n in zf.namelist() if re.fullmatch(r"classes\d*\.dex", n)):
+            try:
+                dex = DexFile(zf.read(name))
+                strings = list(dex.all_strings())
+            except Exception as e:
+                sys.stderr.write("DEX 字符串扫描跳过 %s: %s\n" % (name, e))
+                continue
+            sources.append(name)
+            for value in strings:
+                lowered = value.casefold()
+                for kw in keywords:
+                    if kw.casefold() in lowered:
+                        totals[kw] += 1
+                        if len(hits[kw]) < MAX_KW_HITS:
+                            hits[kw].append("%s 字符串: %r" % (name, value))
+    if not sources:
+        sys.exit("✗ 未找到可扫描的 libapp.so 或 DEX 字符串池")
+    print("✓ 快速扫描完成：%s，关键词 %d 个，命中 %d 处" % (", ".join(sources), len(keywords), sum(totals.values())))
+    print("SO 偏移为 ZIP 条目解压后的文件偏移，非函数 VA，也不是 APK 内 ZIP 偏移。")
+    if not any(totals.values()):
+        print("未命中任何关键词；扫描仅覆盖可见字符串，不能据此判断业务逻辑位置。")
+        return
+    for kw in keywords:
+        if totals[kw]:
+            print("  [%s] %d 处%s" % (kw, totals[kw],
+                  "，仅显示前 %d（输出截断）" % MAX_KW_HITS if totals[kw] > MAX_KW_HITS else ""))
+            for hit in hits[kw]:
+                print("    " + hit)
+    print("提示: DEX 命中用 dex-refs 查代码引用；SO 文件偏移仅用于字符串定位。")
 
 
 def cmd_dex_refs(args):
@@ -275,7 +352,8 @@ def cmd_dex_smali(args):
 
 
 def cmd_dex_string_edit(args):
-    p, old, new, out = apk_path(args[0]), args[1], args[2], out_path(args[3])
+    p, old, new = apk_path(args[0]), args[1], args[2]
+    out = args[3] if args[3].startswith("/") else os.path.join(APK_DIR, args[3])
     from reapk.dex._leb import enc_mutf8
     if len(enc_mutf8(new)) > len(enc_mutf8(old)):
         sys.exit("✗ 新字符串不能比旧字符串长（原地修改限制）：新 %d > 旧 %d 字节（MUTF-8 编码后长度）"
@@ -283,16 +361,39 @@ def cmd_dex_string_edit(args):
     replaced = _patch_string_in_dexes(p, old, new, save_to=out)
     if replaced == 0:
         sys.exit("✗ 未在 dex 字符串池中找到: %r" % old)
-    print("✓ 已替换 %d 处字符串 %r -> %r（原地 MUTF-8 写回，校验和已重算）" % (replaced, old, new))
+    print("✓ 已替换 %d 处字符串 %r -> %r（字符串池已重排/去重，引用与校验和已重算）" % (replaced, old, new))
     print("• 输出: %s（未签名）" % out)
     print("• 下一步: 调用 apk_sign 工具（参数 apk 传该输出文件名）完成签名与导出")
 
 
 def cmd_rebuild(args):
-    p, out = apk_path(args[0]), out_path(args[1])
-    apk = Apk.open(p)
-    apk.save(out)
-    print("✓ 已重打包（zipaligned，未签名）: %s（%.2f MB）"
+    parser = argparse.ArgumentParser(prog="apk_tool.py rebuild")
+    parser.add_argument("apk")
+    parser.add_argument("out")
+    parser.add_argument("--replace", action="append", default=[], metavar="ZIP_ENTRY=FILE")
+    options = parser.parse_args(args)
+    p = apk_path(options.apk)
+    replacements = {}
+    with zipfile.ZipFile(p) as zf:
+        names = zf.namelist()
+    for replacement in options.replace:
+        name, separator, filename = replacement.partition("=")
+        if not separator or not name or not filename:
+            parser.error("--replace 需使用 ZIP条目=容器文件 格式")
+        if names.count(name) != 1:
+            parser.error("--replace 仅支持唯一存在的 ZIP 条目: %s" % name)
+        if name in replacements:
+            parser.error("--replace 重复指定 ZIP 条目: %s" % name)
+        if not os.path.isfile(filename):
+            parser.error("--replace 文件不存在或不是普通文件: %s" % filename)
+        try:
+            with open(filename, "rb") as f:
+                replacements[name] = f.read()
+        except OSError as e:
+            parser.error("--replace 文件无法读取: %s" % e)
+    out = out_path(options.out)
+    Apk.open(p).save(out, replacements=replacements)
+    print("✓ 已重打包（zipaligned，SO 16 KiB，其余 stored 4 字节；未签名）: %s（%.2f MB）"
           % (out, os.path.getsize(out) / 1048576))
 
 
@@ -412,13 +513,16 @@ _XREF_OPS = {
 }
 
 
-def _xref_method_index(dex, cls, mname):
-    """在 dex 里找方法名匹配的 method_idx 集合（跨所有引用处用 idx 匹配）。"""
-    return {i for i in range(dex.n_method) if dex.method_ref(i)[1] == mname}
+def _xref_method_index(dex, cls, mname, signature=None):
+    return {i for i in range(dex.n_method)
+            if dex.method_ref(i)[:2] == (cls, mname)
+            and (signature is None or dex.method_ref(i)[2] == signature)}
 
 
-def _xref_field_index(dex, cls, fname):
-    return {i for i in range(dex.n_field) if dex.field_ref(i)[1] == fname}
+def _xref_field_index(dex, cls, fname, field_type=None):
+    return {i for i in range(dex.n_field)
+            if dex.field_ref(i)[:2] == (cls, fname)
+            and (field_type is None or dex.field_ref(i)[2] == field_type)}
 
 
 def _xref_type_index(dex, cls):
@@ -438,17 +542,27 @@ def cmd_dex_xref(args):
     if kind not in ("method", "field", "type"):
         sys.exit("✗ kind 只能是 method/field/type，当前: %s" % kind)
 
-    # 解析目标为 (owner, name)
-    owner, name = None, None
-    if "->" in target:
+    owner, name, signature, field_type = None, None, None, None
+    if kind == "type":
+        owner = target
+    elif "->" in target:
         owner, rest = target.split("->", 1)
-        name = rest.split("(", 1)[0].split(":", 1)[0]
-    else:
-        # type 直接给类描述符
-        if kind == "type":
-            owner = target
+        if kind == "method":
+            name, separator, tail = rest.partition("(")
+            if separator:
+                signature = separator + tail
+                if not re.fullmatch(r"\([^)]*\).+", signature):
+                    sys.exit("✗ 无效 method signature: %s" % signature)
         else:
-            sys.exit("✗ method/field 目标需含 ->，如 Lcom/a/B;->foo")
+            name, separator, tail = rest.partition(":")
+            if separator:
+                field_type = tail
+                if not field_type:
+                    sys.exit("✗ field type 不能为空")
+        if not owner or not name:
+            sys.exit("✗ method/field 目标需包含 owner 和 name")
+    else:
+        sys.exit("✗ method/field 目标需含 ->，如 Lcom/a/B;->foo")
 
     # 归一化 owner 为 DEX 描述符 Lcom/a/B;
     if owner and not owner.startswith("L"):
@@ -460,10 +574,10 @@ def cmd_dex_xref(args):
     for dex_name, dex in load_dexes(p):
         # 计算目标 idx 集合
         if kind == "method":
-            wanted = _xref_method_index(dex, owner, name)
+            wanted = _xref_method_index(dex, owner, name, signature)
             get_ref = lambda i: dex.method_ref(i)
         elif kind == "field":
-            wanted = _xref_field_index(dex, owner, name)
+            wanted = _xref_field_index(dex, owner, name, field_type)
             get_ref = lambda i: dex.field_ref(i)
         else:
             wanted = _xref_type_index(dex, owner)
@@ -528,55 +642,43 @@ def _scan_method_xrefs(dex, code_off, kind, wanted):
 # ---------------------------------------------------------------- 内部工具
 
 def _write_dex_back(p: str, dex_name: str, new_dex: bytes):
-    """把改后的 classesN.dex 写回 APK（其余条目原样复制，对齐不破坏）。"""
+    """把改后的 classesN.dex 写回 aligned unsigned APK，其余压缩数据保持不变。"""
     tmp = p + ".tmp"
-    with zipfile.ZipFile(p) as zin, zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zout:
-        for item in zin.infolist():
-            data = new_dex if item.filename == dex_name else zin.read(item.filename)
-            zout.writestr(item, data)
+    Apk.open(p).save(tmp, replacements={dex_name: new_dex})
     os.replace(tmp, p)
 
 
 def _patch_string_in_dexes(p: str, old: str, new: str, save_to: str) -> int:
-    """在所有 dex 字符串池中原地替换 old -> new（只允许等长或变短）。
-
-    变短时以 NUL 填充剩余空间并更新 MUTF-8 长度头，保持后续条目偏移不变。
-    """
+    """替换字符串后用现有 Interner 和 DEX writer 重排池与全部引用。"""
     from reapk.dex._leb import enc_mutf8, _uleb128
 
-    old_bytes = enc_mutf8(old)   # uleb(utf16长度) + mutf8 字节 + NUL
-    total = 0
-    with zipfile.ZipFile(p) as zf:
-        items = {n: zf.read(n) for n in zf.namelist()}
-    for name in [n for n in items if re.fullmatch(r"classes\d*\.dex", n)]:
-        data = items[name]
-        dex = DexFile(data)
-        hit = False
+    old_bytes, new_bytes = enc_mutf8(old), enc_mutf8(new)
+    if len(new_bytes) > len(old_bytes):
+        raise ValueError("new MUTF-8 string must not be longer than the old string")
+    padded = new_bytes + b"\0" * (len(old_bytes) - len(new_bytes))
+    total, replacements = 0, {}
+    for name, dex in load_dexes(p):
+        data = dex.d
+        buf = bytearray(data)
+        hits = 0
         for i in range(dex.n_str):
             off = struct.unpack_from("<I", data, dex.off_str + 4 * i)[0]
             _, text_off = _uleb128(data, off)
             end = data.index(0, text_off)
-            if data[off:end + 1] != old_bytes:
-                continue
-            new_bytes = enc_mutf8(new)
-            if len(new_bytes) > len(old_bytes):
-                continue  # 不可能（已在外层校验），防御
-            buf = bytearray(data)
-            buf[off:off + len(old_bytes)] = new_bytes
-            # 变短时尾部补 NUL，保证 string_data_item 总长不变、后续偏移不动
-            pad = len(old_bytes) - len(new_bytes)
-            if pad:
-                buf[off + len(new_bytes):off + len(new_bytes) + pad] = b"\x00" * pad
-            data = bytes(buf)
-            hit = True
-            total += 1
-        if hit:
-            items[name] = DexFile(data).finalize()
-    # 写出新 APK
+            if data[off:end + 1] == old_bytes:
+                # Equal-size assignment keeps every old offset valid until the writer remaps it.
+                buf[off:off + len(old_bytes)] = padded
+                hits += 1
+        if hits:
+            patched = DexFile(bytes(buf))
+            interner = Interner(patched).finalize()
+            replacements[name] = build_dex(patched, interner=interner)
+            total += hits
+    if not total:
+        return 0
+    save_to = out_path(save_to)
     tmp = save_to + ".tmp"
-    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zout:
-        for name, data in items.items():
-            zout.writestr(name, data)
+    Apk.open(p).save(tmp, replacements=replacements)
     os.replace(tmp, save_to)
     return total
 
@@ -585,6 +687,7 @@ COMMANDS = {
     "info": (cmd_info, 1, "<apk>"),
     "manifest-edit": (cmd_manifest_edit, 3, "<apk> <ops> <out.apk>"),
     "dex-strings": (cmd_dex_strings, 2, "<apk> <regex>"),
+    "fast-scan": (cmd_fast_scan, 1, "<apk> [关键词,逗号分隔]"),
     "dex-refs": (cmd_dex_refs, 2, "<apk> <regex>"),
     "dex-class": (cmd_dex_class, 2, "<apk> <class>"),
     "dex-fields": (cmd_dex_fields, 2, "<apk> <class>"),
@@ -594,7 +697,7 @@ COMMANDS = {
     "dex-string-edit": (cmd_dex_string_edit, 4, "<apk> <old> <new> <out.apk>"),
     "resource-read": (cmd_resource_read, 2, "<apk> <locator>..."),
     "dex-xref": (cmd_dex_xref, 3, "<apk> <method|field|type> <目标>"),
-    "rebuild": (cmd_rebuild, 2, "<apk> <out.apk>"),
+    "rebuild": (cmd_rebuild, 2, "<apk> <out.apk> [--replace ZIP_ENTRY=FILE]..."),
 }
 
 
@@ -614,6 +717,8 @@ def main():
         sys.exit("✗ 参数不足: %s %s" % (cmd, usage))
     try:
         fn(sys.argv[2:])
+    except BrokenPipeError:
+        os._exit(0)
     except SystemExit:
         raise
     except Exception as e:
